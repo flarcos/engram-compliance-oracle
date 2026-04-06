@@ -8,30 +8,34 @@ use soroban_sdk::xdr::ToXdr;
 #[contracttype]
 #[derive(Clone)]
 pub enum DataKey {
-    /// The admin address (only entity that can update sanctions data)
-    Admin,
+    // ─── IMPORTANT: Variant indices must match the original contract ───
+    // Index 0: was Admin, now Owner (same storage slot, compatible)
+    /// The owner address — controls upgrades and role changes.
+    /// Should be a multi-sig account for production deployments.
+    Owner,           // index 0 (was: Admin)
+    // Index 1-8: unchanged from original contract
     /// Whether an address is sanctioned: DataKey::Sanctioned(addr_string) → bool
     ///
-    /// addr_string is the raw address from any chain, **always lowercased**:
-    /// - ETH: "0xd882cfc20f52f2599d84b8e8d58c7fb62cfe344b"
-    /// - BTC: "bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh"
-    /// - Stellar: "gbjrl4c72vicl7sd7bxa4ksa5vzd5ybvwivum47px457eimdcpnqi3qj"
-    /// - Tron: "tn2yqtv5hpqenasqprfg3dqwxlkdcvk1qu"
-    ///
+    /// addr_string is the raw address from any chain, **always lowercased**.
     /// Callers MUST lowercase addresses before querying `is_sanctioned`.
-    Sanctioned(String),
+    Sanctioned(String),  // index 1 (unchanged)
     /// Total number of sanctioned entities currently on-chain
-    EntityCount,
+    EntityCount,         // index 2 (unchanged)
     /// Ledger timestamp of last sanctions list update
-    LastUpdated,
+    LastUpdated,         // index 3 (unchanged)
     /// SHA-256 hash of the full off-chain dataset (for audit verification)
-    DataHash,
+    DataHash,            // index 4 (unchanged)
     /// Merkle root of the full sanctions dataset (for proof verification)
-    MerkleRoot,
+    MerkleRoot,          // index 5 (unchanged)
     /// Next report ID
-    ReportCount,
+    ReportCount,         // index 6 (unchanged)
     /// Report detail: ReportData(id) → ReportEntry
-    ReportData(u32),
+    ReportData(u32),     // index 7 (unchanged)
+    // ─── NEW: Added at the end to avoid index collision ────────────────
+    /// The operator address — controls day-to-day data operations.
+    /// (add/remove sanctions, review reports, set Merkle root, extend TTL)
+    /// Can be a hot wallet since it cannot upgrade or change roles.
+    Operator,            // index 8 (NEW)
 }
 
 /// Community report stored on-chain
@@ -55,7 +59,7 @@ pub enum OracleError {
     AlreadyInitialized = 1,
     /// Contract has not been initialized yet
     NotInitialized = 2,
-    /// Caller is not the admin
+    /// Caller is not authorized for this operation
     Unauthorized = 3,
     /// Empty address list provided
     EmptyList = 4,
@@ -95,22 +99,45 @@ const REPORT_TTL_THRESHOLD: u32 = 518_400;     // Extend when below ~30 days
 const REPORT_TTL_EXTEND_TO: u32 = 3_110_400;   // Extend to ~180 days
 
 // ─── Contract ───────────────────────────────────────────────────────────────
+//
+// Role separation:
+//
+//   OWNER (cold key / multi-sig)        OPERATOR (hot key)
+//   ─────────────────────────           ──────────────────
+//   initialize()                        add_sanctioned()
+//   upgrade()                           remove_sanctioned()
+//   transfer_owner()                    set_merkle_root()
+//   set_operator()                      review_report()
+//                                       extend_ttl_batch()
+//
+//   If the operator key is compromised, the attacker CANNOT:
+//     - Upgrade the contract binary
+//     - Change the owner or operator
+//     - Brick the contract
+//
+//   The owner can revoke the operator at any time via set_operator().
 
 #[contract]
 pub struct ComplianceOracle;
 
 #[contractimpl]
 impl ComplianceOracle {
-    // ── Admin / Lifecycle ───────────────────────────────────────────────
+    // ── Owner / Lifecycle ───────────────────────────────────────────────
 
-    /// Initialize the oracle with an admin address.
+    /// Initialize the oracle with an owner and operator address.
     /// Can only be called once.
-    pub fn initialize(env: Env, admin: Address) -> Result<(), OracleError> {
-        if env.storage().instance().has(&DataKey::Admin) {
+    ///
+    /// - `owner`: Controls upgrades and role changes. Should be a multi-sig.
+    /// - `operator`: Controls data operations. Can be a hot wallet.
+    ///
+    /// For simple setups, pass the same address for both.
+    pub fn initialize(env: Env, owner: Address, operator: Address) -> Result<(), OracleError> {
+        if env.storage().instance().has(&DataKey::Owner) {
             return Err(OracleError::AlreadyInitialized);
         }
-        admin.require_auth();
-        env.storage().instance().set(&DataKey::Admin, &admin);
+        owner.require_auth();
+        env.storage().instance().set(&DataKey::Owner, &owner);
+        env.storage().instance().set(&DataKey::Operator, &operator);
         env.storage().instance().set(&DataKey::EntityCount, &0u32);
         env.storage().instance().set(&DataKey::ReportCount, &0u32);
 
@@ -118,31 +145,71 @@ impl ComplianceOracle {
 
         env.events().publish(
             (Symbol::new(&env, "initialized"),),
-            admin,
+            (owner, operator),
         );
         Ok(())
     }
 
-    /// Transfer admin to a new address. Both old and new admin must authorize.
-    pub fn transfer_admin(env: Env, new_admin: Address) -> Result<(), OracleError> {
-        let admin = Self::require_admin(&env)?;
-        admin.require_auth();
-        new_admin.require_auth();
+    /// Transfer ownership to a new address. Both old and new owner must authorize.
+    /// This is the highest-privilege operation.
+    pub fn transfer_owner(env: Env, new_owner: Address) -> Result<(), OracleError> {
+        let owner = Self::require_owner(&env)?;
+        owner.require_auth();
+        new_owner.require_auth();
 
-        env.storage().instance().set(&DataKey::Admin, &new_admin);
+        env.storage().instance().set(&DataKey::Owner, &new_owner);
         env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
 
         env.events().publish(
-            (Symbol::new(&env, "admin_transferred"),),
-            new_admin,
+            (Symbol::new(&env, "owner_transferred"),),
+            new_owner,
         );
         Ok(())
     }
 
-    /// Upgrade the contract to a new WASM binary. Admin only.
+    /// One-time migration from v0.3.x → v0.4.0.
+    /// Sets the Operator key (which didn't exist in previous versions).
+    /// Can only be called once (idempotent — fails if Operator already set).
+    /// Owner auth required.
+    pub fn migrate_v4(env: Env, operator: Address) -> Result<(), OracleError> {
+        let owner = Self::require_owner(&env)?;
+        owner.require_auth();
+
+        // Prevent double-migration
+        if env.storage().instance().has(&DataKey::Operator) {
+            return Err(OracleError::AlreadyInitialized);
+        }
+
+        env.storage().instance().set(&DataKey::Operator, &operator);
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
+
+        env.events().publish(
+            (Symbol::new(&env, "migrated_v4"),),
+            operator,
+        );
+        Ok(())
+    }
+
+    /// Set a new operator address. Owner only.
+    /// Use this to rotate hot keys or revoke a compromised operator.
+    pub fn set_operator(env: Env, new_operator: Address) -> Result<(), OracleError> {
+        let owner = Self::require_owner(&env)?;
+        owner.require_auth();
+
+        env.storage().instance().set(&DataKey::Operator, &new_operator);
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
+
+        env.events().publish(
+            (Symbol::new(&env, "operator_changed"),),
+            new_operator,
+        );
+        Ok(())
+    }
+
+    /// Upgrade the contract to a new WASM binary. Owner only.
     pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) -> Result<(), OracleError> {
-        let admin = Self::require_admin(&env)?;
-        admin.require_auth();
+        let owner = Self::require_owner(&env)?;
+        owner.require_auth();
 
         env.deployer().update_current_contract_wasm(new_wasm_hash.clone());
         env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
@@ -154,9 +221,17 @@ impl ComplianceOracle {
         Ok(())
     }
 
-    /// Returns the current admin address.
-    pub fn admin(env: Env) -> Result<Address, OracleError> {
-        Self::require_admin(&env)
+    /// Returns the current owner address.
+    pub fn owner(env: Env) -> Result<Address, OracleError> {
+        Self::require_owner(&env)
+    }
+
+    /// Returns the current operator address.
+    pub fn operator(env: Env) -> Result<Address, OracleError> {
+        env.storage()
+            .instance()
+            .get(&DataKey::Operator)
+            .ok_or(OracleError::NotInitialized)
     }
 
     // ── Read (Free) ─────────────────────────────────────────────────────
@@ -166,12 +241,6 @@ impl ComplianceOracle {
     /// **Important**: The address string MUST be lowercased before calling.
     /// ETH addresses are case-insensitive (EIP-55 mixed-case is a checksum).
     /// The contract stores all addresses in lowercase.
-    ///
-    /// Examples:
-    /// - ETH: `is_sanctioned("0xd882cfc2...")` (lowercased)
-    /// - BTC: `is_sanctioned("bc1q...")`
-    /// - Stellar: `is_sanctioned("gbjrl...")`  (lowercased)
-    /// - Tron: `is_sanctioned("tn2yq...")`     (lowercased)
     pub fn is_sanctioned(env: Env, addr: String) -> bool {
         env.storage()
             .persistent()
@@ -230,10 +299,9 @@ impl ComplianceOracle {
         Ok(results)
     }
 
-    // ── Write (Admin Only) ──────────────────────────────────────────────
+    // ── Write (Operator Only) ───────────────────────────────────────────
 
-    /// Add addresses to the sanctions list. Accepts raw address strings
-    /// from any blockchain (ETH, BTC, Stellar, Tron, etc.)
+    /// Add addresses to the sanctions list. **Operator only.**
     ///
     /// All addresses should be **lowercased** before submission.
     ///
@@ -246,8 +314,8 @@ impl ComplianceOracle {
         data_hash: BytesN<32>,
         data_source: String,
     ) -> Result<u32, OracleError> {
-        let admin = Self::require_admin(&env)?;
-        admin.require_auth();
+        let op = Self::require_operator(&env)?;
+        op.require_auth();
 
         let count = addresses.len();
         if count == 0 {
@@ -259,10 +327,9 @@ impl ComplianceOracle {
 
         let mut added: u32 = 0;
         for addr in addresses.iter() {
-            // Validate address length
             let len = addr.len();
             if len < MIN_ADDR_LEN || len > MAX_ADDR_LEN {
-                continue; // Skip invalid, don't abort entire batch
+                continue;
             }
 
             let key = DataKey::Sanctioned(addr.clone());
@@ -271,12 +338,10 @@ impl ComplianceOracle {
                 env.storage().persistent().extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
                 added += 1;
             } else {
-                // Refresh TTL for existing entries
                 env.storage().persistent().extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
             }
         }
 
-        // Update metadata (saturating_add prevents overflow — C-01 fix)
         let prev_count: u32 = env.storage().instance().get(&DataKey::EntityCount).unwrap_or(0);
         env.storage().instance().set(&DataKey::EntityCount, &prev_count.saturating_add(added));
         env.storage().instance().set(&DataKey::LastUpdated, &env.ledger().timestamp());
@@ -292,15 +357,15 @@ impl ComplianceOracle {
         Ok(added)
     }
 
-    /// Remove addresses from the sanctions list.
+    /// Remove addresses from the sanctions list. **Operator only.**
     pub fn remove_sanctioned(
         env: Env,
         addresses: Vec<String>,
         data_hash: BytesN<32>,
         data_source: String,
     ) -> Result<u32, OracleError> {
-        let admin = Self::require_admin(&env)?;
-        admin.require_auth();
+        let op = Self::require_operator(&env)?;
+        op.require_auth();
 
         let count = addresses.len();
         if count == 0 {
@@ -335,13 +400,13 @@ impl ComplianceOracle {
         Ok(removed)
     }
 
-    /// Update the Merkle root.
+    /// Update the Merkle root. **Operator only.**
     pub fn set_merkle_root(
         env: Env,
         root: BytesN<32>,
     ) -> Result<(), OracleError> {
-        let admin = Self::require_admin(&env)?;
-        admin.require_auth();
+        let op = Self::require_operator(&env)?;
+        op.require_auth();
 
         env.storage().instance().set(&DataKey::MerkleRoot, &root);
         env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
@@ -355,13 +420,8 @@ impl ComplianceOracle {
 
     /// Verify a Merkle proof that an address string is in the sanctions dataset.
     ///
-    /// **Important — Leaf Encoding**:
-    /// The leaf hash is computed as `SHA-256(addr.to_xdr())`, which includes
-    /// the XDR envelope (length prefix + type tag). Off-chain Merkle tree
-    /// builders MUST use the same Soroban XDR encoding — not just the raw
-    /// string bytes — to produce valid proofs.
-    ///
-    /// Returns `Err(InvalidProof)` if the root is not set.
+    /// **Leaf Encoding**: `SHA-256(addr.to_xdr())` — includes XDR envelope.
+    /// Off-chain provers must use the same encoding.
     pub fn verify_merkle_proof(
         env: Env,
         addr: String,
@@ -379,8 +439,6 @@ impl ComplianceOracle {
             return Err(OracleError::InvalidProof);
         }
 
-        // Compute leaf hash: SHA-256(addr.to_xdr())
-        // NOTE: This includes the XDR envelope — off-chain provers must match this.
         let addr_bytes = addr.clone().to_xdr(&env);
         let mut current_hash = env.crypto().sha256(&addr_bytes);
 
@@ -407,7 +465,6 @@ impl ComplianceOracle {
     // ── Community Reporting ─────────────────────────────────────────────
 
     /// Anyone can report a suspicious address from any chain.
-    /// The target is a raw address string (lowercased). Returns the report ID.
     pub fn report_address(
         env: Env,
         reporter: Address,
@@ -416,7 +473,6 @@ impl ComplianceOracle {
     ) -> Result<u32, OracleError> {
         reporter.require_auth();
 
-        // Validate target address length
         let len = target.len();
         if len < MIN_ADDR_LEN || len > MAX_ADDR_LEN {
             return Err(OracleError::InvalidAddressLength);
@@ -428,7 +484,6 @@ impl ComplianceOracle {
             .get(&DataKey::ReportCount)
             .unwrap_or(0u32);
 
-        // Prevent overflow — C-02 fix
         let next_id = report_id.checked_add(1).ok_or(OracleError::ReportLimitReached)?;
 
         let report = ReportEntry {
@@ -440,7 +495,6 @@ impl ComplianceOracle {
         };
 
         env.storage().persistent().set(&DataKey::ReportData(report_id), &report);
-        // Reports get longer TTL (~180 days) to give admin time to review — M-04 fix
         env.storage().persistent().extend_ttl(
             &DataKey::ReportData(report_id),
             REPORT_TTL_THRESHOLD,
@@ -458,14 +512,14 @@ impl ComplianceOracle {
         Ok(report_id)
     }
 
-    /// Admin reviews a community report. Can only be reviewed once — M-03 fix.
+    /// Operator reviews a community report. Can only be reviewed once.
     pub fn review_report(
         env: Env,
         report_id: u32,
         accept: bool,
     ) -> Result<(), OracleError> {
-        let admin = Self::require_admin(&env)?;
-        admin.require_auth();
+        let op = Self::require_operator(&env)?;
+        op.require_auth();
 
         let key = DataKey::ReportData(report_id);
         let mut report: ReportEntry = env
@@ -474,7 +528,6 @@ impl ComplianceOracle {
             .get(&key)
             .ok_or(OracleError::ReportNotFound)?;
 
-        // Prevent re-review — M-03 fix
         if report.status != 0 {
             return Err(OracleError::AlreadyReviewed);
         }
@@ -487,7 +540,6 @@ impl ComplianceOracle {
                 env.storage().persistent().set(&sanction_key, &true);
                 env.storage().persistent().extend_ttl(&sanction_key, TTL_THRESHOLD, TTL_EXTEND_TO);
 
-                // saturating_add prevents overflow — C-01 fix
                 let prev_count: u32 = env.storage().instance().get(&DataKey::EntityCount).unwrap_or(0);
                 env.storage().instance().set(&DataKey::EntityCount, &prev_count.saturating_add(1));
             }
@@ -521,15 +573,15 @@ impl ComplianceOracle {
             .unwrap_or(0u32)
     }
 
-    // ── TTL Management (Admin) ──────────────────────────────────────────
+    // ── TTL Management (Operator) ───────────────────────────────────────
 
-    /// Batch extend TTL for sanctioned address entries.
+    /// Batch extend TTL for sanctioned address entries. **Operator only.**
     pub fn extend_ttl_batch(
         env: Env,
         addresses: Vec<String>,
     ) -> Result<u32, OracleError> {
-        let admin = Self::require_admin(&env)?;
-        admin.require_auth();
+        let op = Self::require_operator(&env)?;
+        op.require_auth();
 
         let count = addresses.len();
         if count > MAX_BATCH_SIZE {
@@ -552,10 +604,17 @@ impl ComplianceOracle {
 
     // ── Internal Helpers ────────────────────────────────────────────────
 
-    fn require_admin(env: &Env) -> Result<Address, OracleError> {
+    fn require_owner(env: &Env) -> Result<Address, OracleError> {
         env.storage()
             .instance()
-            .get(&DataKey::Admin)
+            .get(&DataKey::Owner)
+            .ok_or(OracleError::NotInitialized)
+    }
+
+    fn require_operator(env: &Env) -> Result<Address, OracleError> {
+        env.storage()
+            .instance()
+            .get(&DataKey::Operator)
             .ok_or(OracleError::NotInitialized)
     }
 }

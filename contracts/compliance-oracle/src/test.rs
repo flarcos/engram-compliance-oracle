@@ -3,17 +3,18 @@
 use super::*;
 use soroban_sdk::{testutils::Address as _, Address, BytesN, Env, String, Vec};
 
-fn setup_env() -> (Env, Address, ComplianceOracleClient<'static>) {
+fn setup_env() -> (Env, Address, Address, ComplianceOracleClient<'static>) {
     let env = Env::default();
     env.mock_all_auths();
 
     let contract_id = env.register(ComplianceOracle, ());
     let client = ComplianceOracleClient::new(&env, &contract_id);
-    let admin = Address::generate(&env);
+    let owner = Address::generate(&env);
+    let operator = Address::generate(&env);
 
-    client.initialize(&admin);
+    client.initialize(&owner, &operator);
 
-    (env, admin, client)
+    (env, owner, operator, client)
 }
 
 fn mock_data_hash(env: &Env) -> BytesN<32> {
@@ -25,30 +26,62 @@ fn mock_data_hash(env: &Env) -> BytesN<32> {
     ])
 }
 
-// ─── Initialization ─────────────────────────────────────────────────────
+// ─── Initialization & Roles ─────────────────────────────────────────────
 
 #[test]
 fn test_initialize() {
-    let (_env, admin, client) = setup_env();
-    assert_eq!(client.admin(), admin);
+    let (_env, owner, operator, client) = setup_env();
+    assert_eq!(client.owner(), owner);
+    assert_eq!(client.operator(), operator);
     assert_eq!(client.entity_count(), 0);
     assert_eq!(client.last_updated(), 0);
     assert_eq!(client.report_count(), 0);
 }
 
 #[test]
+fn test_initialize_same_owner_and_operator() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(ComplianceOracle, ());
+    let client = ComplianceOracleClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+
+    client.initialize(&admin, &admin);
+    assert_eq!(client.owner(), admin.clone());
+    assert_eq!(client.operator(), admin);
+}
+
+#[test]
 #[should_panic(expected = "Error(Contract, #1)")]
 fn test_double_initialize_fails() {
-    let (env, _admin, client) = setup_env();
+    let (env, _owner, _operator, client) = setup_env();
     let another = Address::generate(&env);
-    client.initialize(&another);
+    client.initialize(&another, &another);
+}
+
+#[test]
+fn test_transfer_owner() {
+    let (env, _owner, _operator, client) = setup_env();
+    let new_owner = Address::generate(&env);
+
+    client.transfer_owner(&new_owner);
+    assert_eq!(client.owner(), new_owner);
+}
+
+#[test]
+fn test_set_operator() {
+    let (env, _owner, _operator, client) = setup_env();
+    let new_operator = Address::generate(&env);
+
+    client.set_operator(&new_operator);
+    assert_eq!(client.operator(), new_operator);
 }
 
 // ─── Multi-Chain Add Sanctioned ─────────────────────────────────────────
 
 #[test]
 fn test_add_eth_addresses() {
-    let (env, _admin, client) = setup_env();
+    let (env, _owner, _operator, client) = setup_env();
     let hash = mock_data_hash(&env);
     let source = String::from_str(&env, "ofac_sdn");
 
@@ -68,7 +101,7 @@ fn test_add_eth_addresses() {
 
 #[test]
 fn test_add_btc_addresses() {
-    let (env, _admin, client) = setup_env();
+    let (env, _owner, _operator, client) = setup_env();
     let hash = mock_data_hash(&env);
     let source = String::from_str(&env, "ofac_sdn");
 
@@ -84,7 +117,7 @@ fn test_add_btc_addresses() {
 
 #[test]
 fn test_add_tron_addresses() {
-    let (env, _admin, client) = setup_env();
+    let (env, _owner, _operator, client) = setup_env();
     let hash = mock_data_hash(&env);
     let source = String::from_str(&env, "opensanctions");
 
@@ -100,7 +133,7 @@ fn test_add_tron_addresses() {
 
 #[test]
 fn test_add_mixed_chain_addresses() {
-    let (env, _admin, client) = setup_env();
+    let (env, _owner, _operator, client) = setup_env();
     let hash = mock_data_hash(&env);
     let source = String::from_str(&env, "ofac_sdn");
 
@@ -119,20 +152,18 @@ fn test_add_mixed_chain_addresses() {
     assert_eq!(added, 4);
     assert_eq!(client.entity_count(), 4);
 
-    // All are sanctioned
     assert!(client.is_sanctioned(&eth));
     assert!(client.is_sanctioned(&btc));
     assert!(client.is_sanctioned(&tron));
     assert!(client.is_sanctioned(&stellar));
 
-    // Unknown address is clean
     let unknown = String::from_str(&env, "0x0000000000000000000000000000000000000000");
     assert!(!client.is_sanctioned(&unknown));
 }
 
 #[test]
 fn test_add_duplicate_does_not_double_count() {
-    let (env, _admin, client) = setup_env();
+    let (env, _owner, _operator, client) = setup_env();
     let hash = mock_data_hash(&env);
     let source = String::from_str(&env, "ofac_sdn");
 
@@ -150,11 +181,11 @@ fn test_add_duplicate_does_not_double_count() {
 
 #[test]
 fn test_add_skips_invalid_length_addresses() {
-    let (env, _admin, client) = setup_env();
+    let (env, _owner, _operator, client) = setup_env();
     let hash = mock_data_hash(&env);
     let source = String::from_str(&env, "ofac_sdn");
 
-    let too_short = String::from_str(&env, "0x1234"); // 6 chars < MIN_ADDR_LEN
+    let too_short = String::from_str(&env, "0x1234");
     let valid = String::from_str(&env, "0xd882cfc20f52f2599d84b8e8d58c7fb62cfe344b");
 
     let mut addresses = Vec::new(&env);
@@ -162,7 +193,7 @@ fn test_add_skips_invalid_length_addresses() {
     addresses.push_back(valid.clone());
 
     let added = client.add_sanctioned(&addresses, &hash, &source);
-    assert_eq!(added, 1); // Only valid address added
+    assert_eq!(added, 1);
     assert!(!client.is_sanctioned(&too_short));
     assert!(client.is_sanctioned(&valid));
 }
@@ -171,7 +202,7 @@ fn test_add_skips_invalid_length_addresses() {
 
 #[test]
 fn test_remove_sanctioned() {
-    let (env, _admin, client) = setup_env();
+    let (env, _owner, _operator, client) = setup_env();
     let hash = mock_data_hash(&env);
     let source = String::from_str(&env, "ofac_sdn");
 
@@ -199,7 +230,7 @@ fn test_remove_sanctioned() {
 
 #[test]
 fn test_batch_check() {
-    let (env, _admin, client) = setup_env();
+    let (env, _owner, _operator, client) = setup_env();
     let hash = mock_data_hash(&env);
     let source = String::from_str(&env, "ofac_sdn");
 
@@ -222,7 +253,7 @@ fn test_batch_check() {
 #[test]
 #[should_panic(expected = "Error(Contract, #5)")]
 fn test_batch_check_too_large() {
-    let (env, _admin, client) = setup_env();
+    let (env, _owner, _operator, client) = setup_env();
     let mut addresses = Vec::new(&env);
     let addr = String::from_str(&env, "0xd882cfc20f52f2599d84b8e8d58c7fb62cfe344b");
     for _ in 0..201u32 {
@@ -231,22 +262,11 @@ fn test_batch_check_too_large() {
     client.check_batch(&addresses);
 }
 
-// ─── Admin Transfer ─────────────────────────────────────────────────────
-
-#[test]
-fn test_transfer_admin() {
-    let (env, _admin, client) = setup_env();
-    let new_admin = Address::generate(&env);
-
-    client.transfer_admin(&new_admin);
-    assert_eq!(client.admin(), new_admin);
-}
-
 // ─── Merkle Root ────────────────────────────────────────────────────────
 
 #[test]
 fn test_set_merkle_root() {
-    let (env, _admin, client) = setup_env();
+    let (env, _owner, _operator, client) = setup_env();
     let root = mock_data_hash(&env);
 
     client.set_merkle_root(&root);
@@ -255,11 +275,10 @@ fn test_set_merkle_root() {
 
 #[test]
 fn test_verify_merkle_proof_no_root_returns_error() {
-    let (env, _admin, client) = setup_env();
+    let (env, _owner, _operator, client) = setup_env();
     let addr = String::from_str(&env, "0xd882cfc20f52f2599d84b8e8d58c7fb62cfe344b");
     let proof: Vec<BytesN<32>> = Vec::new(&env);
 
-    // Should return InvalidProof error when no root is set
     let result = client.try_verify_merkle_proof(&addr, &proof, &0);
     assert!(result.is_err());
 }
@@ -268,7 +287,7 @@ fn test_verify_merkle_proof_no_root_returns_error() {
 
 #[test]
 fn test_report_eth_address() {
-    let (env, _admin, client) = setup_env();
+    let (env, _owner, _operator, client) = setup_env();
 
     let reporter = Address::generate(&env);
     let target = String::from_str(&env, "0xd882cfc20f52f2599d84b8e8d58c7fb62cfe344b");
@@ -286,18 +305,18 @@ fn test_report_eth_address() {
 
 #[test]
 fn test_report_invalid_address_length() {
-    let (env, _admin, client) = setup_env();
+    let (env, _owner, _operator, client) = setup_env();
     let reporter = Address::generate(&env);
-    let too_short = String::from_str(&env, "0x1234"); // too short
+    let too_short = String::from_str(&env, "0x1234");
     let reason = String::from_str(&env, "test");
 
     let result = client.try_report_address(&reporter, &too_short, &reason);
-    assert!(result.is_err()); // InvalidAddressLength
+    assert!(result.is_err());
 }
 
 #[test]
 fn test_review_report_accept() {
-    let (env, _admin, client) = setup_env();
+    let (env, _owner, _operator, client) = setup_env();
 
     let reporter = Address::generate(&env);
     let target = String::from_str(&env, "tn2yqtv5hpqenasqprfg3dqwxlkdcvk1qu");
@@ -315,7 +334,7 @@ fn test_review_report_accept() {
 
 #[test]
 fn test_review_report_reject() {
-    let (env, _admin, client) = setup_env();
+    let (env, _owner, _operator, client) = setup_env();
 
     let reporter = Address::generate(&env);
     let target = String::from_str(&env, "0x0000000000000000000000000000000000000000");
@@ -331,7 +350,7 @@ fn test_review_report_reject() {
 
 #[test]
 fn test_review_report_already_reviewed_fails() {
-    let (env, _admin, client) = setup_env();
+    let (env, _owner, _operator, client) = setup_env();
 
     let reporter = Address::generate(&env);
     let target = String::from_str(&env, "0xd882cfc20f52f2599d84b8e8d58c7fb62cfe344b");
@@ -340,7 +359,6 @@ fn test_review_report_already_reviewed_fails() {
     client.report_address(&reporter, &target, &reason);
     client.review_report(&0, &true);
 
-    // Second review should fail with AlreadyReviewed
     let result = client.try_review_report(&0, &false);
     assert!(result.is_err());
 }
@@ -348,7 +366,7 @@ fn test_review_report_already_reviewed_fails() {
 #[test]
 #[should_panic(expected = "Error(Contract, #7)")]
 fn test_review_nonexistent_report_fails() {
-    let (_env, _admin, client) = setup_env();
+    let (_env, _owner, _operator, client) = setup_env();
     client.review_report(&999, &true);
 }
 
@@ -356,7 +374,7 @@ fn test_review_nonexistent_report_fails() {
 
 #[test]
 fn test_extend_ttl_batch() {
-    let (env, _admin, client) = setup_env();
+    let (env, _owner, _operator, client) = setup_env();
     let hash = mock_data_hash(&env);
     let source = String::from_str(&env, "ofac_sdn");
 
@@ -378,7 +396,7 @@ fn test_extend_ttl_batch() {
 #[test]
 #[should_panic(expected = "Error(Contract, #4)")]
 fn test_add_empty_list_fails() {
-    let (env, _admin, client) = setup_env();
+    let (env, _owner, _operator, client) = setup_env();
     let hash = mock_data_hash(&env);
     let source = String::from_str(&env, "ofac_sdn");
     let empty: Vec<String> = Vec::new(&env);
@@ -388,7 +406,7 @@ fn test_add_empty_list_fails() {
 
 #[test]
 fn test_remove_more_than_count_saturates_to_zero() {
-    let (env, _admin, client) = setup_env();
+    let (env, _owner, _operator, client) = setup_env();
     let hash = mock_data_hash(&env);
     let source = String::from_str(&env, "ofac_sdn");
 
@@ -399,11 +417,9 @@ fn test_remove_more_than_count_saturates_to_zero() {
     client.add_sanctioned(&addresses, &hash, &source);
     assert_eq!(client.entity_count(), 1);
 
-    // Remove same address twice in two calls
     client.remove_sanctioned(&addresses, &hash, &source);
     assert_eq!(client.entity_count(), 0);
 
-    // Removing again when count is already 0 should saturate to 0
     client.remove_sanctioned(&addresses, &hash, &source);
     assert_eq!(client.entity_count(), 0);
 }
