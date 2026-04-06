@@ -1,6 +1,6 @@
 {
   "generators": {
-    "address": 3,
+    "address": 2,
     "nonce": 0
   },
   "auth": [
@@ -36,7 +36,7 @@
                 {
                   "vec": [
                     {
-                      "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
+                      "string": "0xd882cFc20F52f2599D84b8e8D58C7FB62cfE344b"
                     }
                   ]
                 },
@@ -66,7 +66,7 @@
                 {
                   "vec": [
                     {
-                      "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
+                      "string": "0xd882cFc20F52f2599D84b8e8D58C7FB62cfE344b"
                     }
                   ]
                 },
@@ -105,7 +105,7 @@
                   "symbol": "Sanctioned"
                 },
                 {
-                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
+                  "string": "0xd882cFc20F52f2599D84b8e8D58C7FB62cfE344b"
                 }
               ]
             },
@@ -125,7 +125,7 @@
                       "symbol": "Sanctioned"
                     },
                     {
-                      "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
+                      "string": "0xd882cFc20F52f2599D84b8e8D58C7FB62cfE344b"
                     }
                   ]
                 },

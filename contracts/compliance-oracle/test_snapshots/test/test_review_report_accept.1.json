@@ -1,6 +1,6 @@
 {
   "generators": {
-    "address": 4,
+    "address": 3,
     "nonce": 0
   },
   "auth": [
@@ -37,10 +37,10 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
                 },
                 {
-                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4"
+                  "string": "TN2YqTv5HpqENAsQPRFG3dqWxLkDCVk1qU"
                 },
                 {
-                  "string": "OFAC match"
+                  "string": "Known mixer"
                 }
               ]
             }
@@ -127,7 +127,7 @@
                         "symbol": "reason"
                       },
                       "val": {
-                        "string": "OFAC match"
+                        "string": "Known mixer"
                       }
                     },
                     {
@@ -151,7 +151,7 @@
                         "symbol": "target"
                       },
                       "val": {
-                        "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4"
+                        "string": "TN2YqTv5HpqENAsQPRFG3dqWxLkDCVk1qU"
                       }
                     },
                     {
@@ -181,7 +181,7 @@
                   "symbol": "Sanctioned"
                 },
                 {
-                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4"
+                  "string": "TN2YqTv5HpqENAsQPRFG3dqWxLkDCVk1qU"
                 }
               ]
             },
@@ -201,7 +201,7 @@
                       "symbol": "Sanctioned"
                     },
                     {
-                      "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4"
+                      "string": "TN2YqTv5HpqENAsQPRFG3dqWxLkDCVk1qU"
                     }
                   ]
                 },

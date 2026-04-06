@@ -10,8 +10,9 @@ use soroban_sdk::xdr::ToXdr;
 pub enum DataKey {
     /// The admin address (only entity that can update sanctions data)
     Admin,
-    /// Whether an address is sanctioned: DataKey::Sanctioned(addr) → bool
-    Sanctioned(Address),
+    /// Whether an address is sanctioned: DataKey::Sanctioned(addr_string) → bool
+    /// addr_string is the raw address from any chain (e.g. "0x...", "bc1...", "G...", "T...")
+    Sanctioned(String),
     /// Total number of sanctioned entities currently on-chain
     EntityCount,
     /// Ledger timestamp of last sanctions list update
@@ -20,11 +21,9 @@ pub enum DataKey {
     DataHash,
     /// Merkle root of the full sanctions dataset (for proof verification)
     MerkleRoot,
-    /// Community report: reporter → target address (pending review)
-    Report(u32),
     /// Next report ID
     ReportCount,
-    /// Report detail: Report(id) → ReportData
+    /// Report detail: ReportData(id) → ReportEntry
     ReportData(u32),
 }
 
@@ -33,7 +32,7 @@ pub enum DataKey {
 #[derive(Clone)]
 pub struct ReportEntry {
     pub reporter: Address,
-    pub target: Address,
+    pub target: String,   // Any chain address as a string
     pub reason: String,
     pub timestamp: u64,
     pub status: u32, // 0=pending, 1=accepted, 2=rejected
@@ -93,7 +92,6 @@ impl ComplianceOracle {
         env.storage().instance().set(&DataKey::EntityCount, &0u32);
         env.storage().instance().set(&DataKey::ReportCount, &0u32);
 
-        // Extend instance TTL on init
         env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
 
         env.events().publish(
@@ -120,7 +118,6 @@ impl ComplianceOracle {
     }
 
     /// Upgrade the contract to a new WASM binary. Admin only.
-    /// The new WASM must be uploaded to the ledger first via `stellar contract upload`.
     pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) -> Result<(), OracleError> {
         let admin = Self::require_admin(&env)?;
         admin.require_auth();
@@ -142,10 +139,10 @@ impl ComplianceOracle {
 
     // ── Read (Free) ─────────────────────────────────────────────────────
 
-    /// Check if an address is sanctioned.
-    /// Returns `true` if the address is on the sanctions list.
-    /// This is a free `view` call — no transaction fees for callers.
-    pub fn is_sanctioned(env: Env, addr: Address) -> bool {
+    /// Check if an address from ANY chain is sanctioned.
+    /// Pass the raw address string: "0x1234..." (ETH), "bc1..." (BTC),
+    /// "G..." (Stellar), "T..." (Tron), etc.
+    pub fn is_sanctioned(env: Env, addr: String) -> bool {
         env.storage()
             .persistent()
             .get(&DataKey::Sanctioned(addr))
@@ -168,9 +165,7 @@ impl ComplianceOracle {
             .unwrap_or(0u64)
     }
 
-    /// Returns the SHA-256 hash of the off-chain dataset used for the
-    /// latest update. Enables independent audit — download the dataset
-    /// from Engram/Shelby, hash it, and compare.
+    /// Returns the SHA-256 hash of the off-chain dataset.
     pub fn data_hash(env: Env) -> BytesN<32> {
         env.storage()
             .instance()
@@ -188,7 +183,7 @@ impl ComplianceOracle {
 
     /// Batch check multiple addresses at once.
     /// Returns a vector of booleans in the same order as the input.
-    pub fn check_batch(env: Env, addresses: Vec<Address>) -> Vec<bool> {
+    pub fn check_batch(env: Env, addresses: Vec<String>) -> Vec<bool> {
         let mut results = Vec::new(&env);
         for addr in addresses.iter() {
             let sanctioned = env
@@ -203,13 +198,15 @@ impl ComplianceOracle {
 
     // ── Write (Admin Only) ──────────────────────────────────────────────
 
-    /// Add addresses to the sanctions list.
-    /// - `addresses`: up to 200 addresses per call
+    /// Add addresses to the sanctions list. Accepts raw address strings
+    /// from any blockchain (ETH, BTC, Stellar, Tron, etc.)
+    ///
+    /// - `addresses`: up to 200 address strings per call
     /// - `data_hash`: SHA-256 of the full dataset snapshot
     /// - `data_source`: data source identifier (e.g. "ofac_sdn")
     pub fn add_sanctioned(
         env: Env,
-        addresses: Vec<Address>,
+        addresses: Vec<String>,
         data_hash: BytesN<32>,
         data_source: String,
     ) -> Result<u32, OracleError> {
@@ -229,11 +226,9 @@ impl ComplianceOracle {
             let key = DataKey::Sanctioned(addr.clone());
             if !env.storage().persistent().has(&key) {
                 env.storage().persistent().set(&key, &true);
-                // Extend TTL for each new entry (~30 days)
                 env.storage().persistent().extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
                 added += 1;
             } else {
-                // Entry exists — just refresh TTL
                 env.storage().persistent().extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
             }
         }
@@ -244,7 +239,6 @@ impl ComplianceOracle {
         env.storage().instance().set(&DataKey::LastUpdated, &env.ledger().timestamp());
         env.storage().instance().set(&DataKey::DataHash, &data_hash);
 
-        // Extend instance TTL
         env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
 
         env.events().publish(
@@ -256,10 +250,9 @@ impl ComplianceOracle {
     }
 
     /// Remove addresses from the sanctions list.
-    /// Used when OFAC delists an entity.
     pub fn remove_sanctioned(
         env: Env,
-        addresses: Vec<Address>,
+        addresses: Vec<String>,
         data_hash: BytesN<32>,
         data_source: String,
     ) -> Result<u32, OracleError> {
@@ -283,7 +276,6 @@ impl ComplianceOracle {
             }
         }
 
-        // Update metadata
         let prev_count: u32 = env.storage().instance().get(&DataKey::EntityCount).unwrap_or(0);
         let new_count = if removed > prev_count { 0 } else { prev_count - removed };
         env.storage().instance().set(&DataKey::EntityCount, &new_count);
@@ -300,8 +292,7 @@ impl ComplianceOracle {
         Ok(removed)
     }
 
-    /// Update the Merkle root. Called by admin after rebuilding the
-    /// Merkle tree from the full dataset.
+    /// Update the Merkle root.
     pub fn set_merkle_root(
         env: Env,
         root: BytesN<32>,
@@ -319,17 +310,10 @@ impl ComplianceOracle {
         Ok(())
     }
 
-    /// Verify a Merkle proof that an address is in the sanctions dataset.
-    /// This enables trustless verification without storing every address on-chain.
-    ///
-    /// - `addr`: the address to verify
-    /// - `proof`: vector of 32-byte sibling hashes along the path
-    /// - `leaf_index`: the index of the leaf in the tree
-    ///
-    /// Returns true if the proof is valid against the stored Merkle root.
+    /// Verify a Merkle proof that an address string is in the sanctions dataset.
     pub fn verify_merkle_proof(
         env: Env,
-        addr: Address,
+        addr: String,
         proof: Vec<BytesN<32>>,
         leaf_index: u32,
     ) -> bool {
@@ -339,28 +323,24 @@ impl ComplianceOracle {
             .get(&DataKey::MerkleRoot)
             .unwrap_or(BytesN::from_array(&env, &[0u8; 32]));
 
-        // If no root is set, proof is invalid
         let zero_root = BytesN::from_array(&env, &[0u8; 32]);
         if stored_root == zero_root {
             return false;
         }
 
-        // Compute leaf hash: SHA-256(address.to_xdr())
+        // Compute leaf hash: SHA-256(address_string_bytes)
         let addr_bytes = addr.clone().to_xdr(&env);
         let mut current_hash = env.crypto().sha256(&addr_bytes);
 
-        // Walk up the tree
         let mut idx = leaf_index;
         for sibling in proof.iter() {
             let sibling_bytes: BytesN<32> = sibling;
             if idx % 2 == 0 {
-                // current is left child, sibling is right
                 let mut combined = Bytes::new(&env);
                 combined.append(&Bytes::from_slice(&env, current_hash.to_array().as_slice()));
                 combined.append(&Bytes::from_slice(&env, sibling_bytes.to_array().as_slice()));
                 current_hash = env.crypto().sha256(&combined);
             } else {
-                // current is right child, sibling is left
                 let mut combined = Bytes::new(&env);
                 combined.append(&Bytes::from_slice(&env, sibling_bytes.to_array().as_slice()));
                 combined.append(&Bytes::from_slice(&env, current_hash.to_array().as_slice()));
@@ -369,20 +349,17 @@ impl ComplianceOracle {
             idx /= 2;
         }
 
-        // Compare computed root with stored root
         BytesN::from_array(&env, &current_hash.to_array()) == stored_root
     }
 
     // ── Community Reporting ─────────────────────────────────────────────
 
-    /// Anyone can report a suspicious address. The report is stored on-chain
-    /// and requires admin review to promote to sanctioned status.
-    ///
-    /// Returns the report ID.
+    /// Anyone can report a suspicious address from any chain.
+    /// The target is a raw address string. Returns the report ID.
     pub fn report_address(
         env: Env,
         reporter: Address,
-        target: Address,
+        target: String,
         reason: String,
     ) -> u32 {
         reporter.require_auth();
@@ -398,7 +375,7 @@ impl ComplianceOracle {
             target: target.clone(),
             reason,
             timestamp: env.ledger().timestamp(),
-            status: 0, // pending
+            status: 0,
         };
 
         env.storage().persistent().set(&DataKey::ReportData(report_id), &report);
@@ -420,7 +397,6 @@ impl ComplianceOracle {
     }
 
     /// Admin reviews a community report.
-    /// - `accept`: true = add to sanctions list, false = reject
     pub fn review_report(
         env: Env,
         report_id: u32,
@@ -437,9 +413,8 @@ impl ComplianceOracle {
             .ok_or(OracleError::ReportNotFound)?;
 
         if accept {
-            report.status = 1; // accepted
+            report.status = 1;
 
-            // Add the target to the sanctions list
             let sanction_key = DataKey::Sanctioned(report.target.clone());
             if !env.storage().persistent().has(&sanction_key) {
                 env.storage().persistent().set(&sanction_key, &true);
@@ -449,7 +424,7 @@ impl ComplianceOracle {
                 env.storage().instance().set(&DataKey::EntityCount, &(prev_count + 1));
             }
         } else {
-            report.status = 2; // rejected
+            report.status = 2;
         }
 
         env.storage().persistent().set(&key, &report);
@@ -481,10 +456,9 @@ impl ComplianceOracle {
     // ── TTL Management (Admin) ──────────────────────────────────────────
 
     /// Batch extend TTL for sanctioned address entries.
-    /// Call periodically to prevent entries from being archived.
     pub fn extend_ttl_batch(
         env: Env,
-        addresses: Vec<Address>,
+        addresses: Vec<String>,
     ) -> Result<u32, OracleError> {
         let admin = Self::require_admin(&env)?;
         admin.require_auth();
@@ -503,7 +477,6 @@ impl ComplianceOracle {
             }
         }
 
-        // Also refresh instance
         env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
 
         Ok(extended)

@@ -1,6 +1,6 @@
 {
   "generators": {
-    "address": 2,
+    "address": 3,
     "nonce": 0
   },
   "auth": [
@@ -26,25 +26,21 @@
     ],
     [
       [
-        "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4",
+        "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M",
         {
           "function": {
             "contract_fn": {
               "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-              "function_name": "add_sanctioned",
+              "function_name": "report_address",
               "args": [
                 {
-                  "vec": [
-                    {
-                      "string": "0xd882cFc20F52f2599D84b8e8D58C7FB62cfE344b"
-                    }
-                  ]
+                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
                 },
                 {
-                  "bytes": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
+                  "string": "0xd882cFc20F52f2599D84b8e8D58C7FB62cfE344b"
                 },
                 {
-                  "string": "ofac_sdn"
+                  "string": "OFAC SDN match"
                 }
               ]
             }
@@ -53,6 +49,7 @@
         }
       ]
     ],
+    [],
     []
   ],
   "ledger": {
@@ -72,10 +69,10 @@
             "key": {
               "vec": [
                 {
-                  "symbol": "Sanctioned"
+                  "symbol": "ReportData"
                 },
                 {
-                  "string": "0xd882cFc20F52f2599D84b8e8D58C7FB62cfE344b"
+                  "u32": 0
                 }
               ]
             },
@@ -92,16 +89,57 @@
                 "key": {
                   "vec": [
                     {
-                      "symbol": "Sanctioned"
+                      "symbol": "ReportData"
                     },
                     {
-                      "string": "0xd882cFc20F52f2599D84b8e8D58C7FB62cfE344b"
+                      "u32": 0
                     }
                   ]
                 },
                 "durability": "persistent",
                 "val": {
-                  "bool": true
+                  "map": [
+                    {
+                      "key": {
+                        "symbol": "reason"
+                      },
+                      "val": {
+                        "string": "OFAC SDN match"
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "reporter"
+                      },
+                      "val": {
+                        "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "status"
+                      },
+                      "val": {
+                        "u32": 0
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "target"
+                      },
+                      "val": {
+                        "string": "0xd882cFc20F52f2599D84b8e8D58C7FB62cfE344b"
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "timestamp"
+                      },
+                      "val": {
+                        "u64": 0
+                      }
+                    }
+                  ]
                 }
               }
             },
@@ -149,36 +187,12 @@
                         "key": {
                           "vec": [
                             {
-                              "symbol": "DataHash"
-                            }
-                          ]
-                        },
-                        "val": {
-                          "bytes": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
-                        }
-                      },
-                      {
-                        "key": {
-                          "vec": [
-                            {
                               "symbol": "EntityCount"
                             }
                           ]
                         },
                         "val": {
-                          "u32": 1
-                        }
-                      },
-                      {
-                        "key": {
-                          "vec": [
-                            {
-                              "symbol": "LastUpdated"
-                            }
-                          ]
-                        },
-                        "val": {
-                          "u64": 0
+                          "u32": 0
                         }
                       },
                       {
@@ -190,7 +204,7 @@
                           ]
                         },
                         "val": {
-                          "u32": 0
+                          "u32": 1
                         }
                       }
                     ]
@@ -239,7 +253,7 @@
       [
         {
           "contract_data": {
-            "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4",
+            "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M",
             "key": {
               "ledger_key_nonce": {
                 "nonce": 5541220902715666415
@@ -254,7 +268,7 @@
             "data": {
               "contract_data": {
                 "ext": "v0",
-                "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4",
+                "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M",
                 "key": {
                   "ledger_key_nonce": {
                     "nonce": 5541220902715666415

@@ -36,7 +36,7 @@
                 {
                   "vec": [
                     {
-                      "string": "0xd882cFc20F52f2599D84b8e8D58C7FB62cfE344b"
+                      "string": "TN2YqTv5HpqENAsQPRFG3dqWxLkDCVk1qU"
                     }
                   ]
                 },
@@ -44,7 +44,7 @@
                   "bytes": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
                 },
                 {
-                  "string": "ofac_sdn"
+                  "string": "opensanctions"
                 }
               ]
             }
@@ -75,7 +75,7 @@
                   "symbol": "Sanctioned"
                 },
                 {
-                  "string": "0xd882cFc20F52f2599D84b8e8D58C7FB62cfE344b"
+                  "string": "TN2YqTv5HpqENAsQPRFG3dqWxLkDCVk1qU"
                 }
               ]
             },
@@ -95,7 +95,7 @@
                       "symbol": "Sanctioned"
                     },
                     {
-                      "string": "0xd882cFc20F52f2599D84b8e8D58C7FB62cfE344b"
+                      "string": "TN2YqTv5HpqENAsQPRFG3dqWxLkDCVk1qU"
                     }
                   ]
                 },
