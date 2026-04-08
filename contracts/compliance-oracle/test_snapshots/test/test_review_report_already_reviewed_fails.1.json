@@ -93,6 +93,57 @@
             "key": {
               "vec": [
                 {
+                  "symbol": "HasReported"
+                },
+                {
+                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4"
+                },
+                {
+                  "string": "0xd882cfc20f52f2599d84b8e8d58c7fb62cfe344b"
+                }
+              ]
+            },
+            "durability": "persistent"
+          }
+        },
+        [
+          {
+            "last_modified_ledger_seq": 0,
+            "data": {
+              "contract_data": {
+                "ext": "v0",
+                "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+                "key": {
+                  "vec": [
+                    {
+                      "symbol": "HasReported"
+                    },
+                    {
+                      "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4"
+                    },
+                    {
+                      "string": "0xd882cfc20f52f2599d84b8e8d58c7fb62cfe344b"
+                    }
+                  ]
+                },
+                "durability": "persistent",
+                "val": {
+                  "bool": true
+                }
+              }
+            },
+            "ext": "v0"
+          },
+          3110400
+        ]
+      ],
+      [
+        {
+          "contract_data": {
+            "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+            "key": {
+              "vec": [
+                {
                   "symbol": "ReportData"
                 },
                 {
@@ -179,7 +230,7 @@
             "key": {
               "vec": [
                 {
-                  "symbol": "Sanctioned"
+                  "symbol": "ReportsByTarget"
                 },
                 {
                   "string": "0xd882cfc20f52f2599d84b8e8d58c7fb62cfe344b"
@@ -199,7 +250,7 @@
                 "key": {
                   "vec": [
                     {
-                      "symbol": "Sanctioned"
+                      "symbol": "ReportsByTarget"
                     },
                     {
                       "string": "0xd882cfc20f52f2599d84b8e8d58c7fb62cfe344b"
@@ -208,13 +259,13 @@
                 },
                 "durability": "persistent",
                 "val": {
-                  "bool": true
+                  "u32": 1
                 }
               }
             },
             "ext": "v0"
           },
-          518400
+          3110400
         ]
       ],
       [
@@ -249,7 +300,7 @@
                           ]
                         },
                         "val": {
-                          "u32": 1
+                          "u32": 0
                         }
                       },
                       {
@@ -286,6 +337,18 @@
                         },
                         "val": {
                           "u32": 1
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "ReportThreshold"
+                            }
+                          ]
+                        },
+                        "val": {
+                          "u32": 10
                         }
                       }
                     ]

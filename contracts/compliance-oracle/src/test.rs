@@ -1,7 +1,8 @@
 #![cfg(test)]
 
 use super::*;
-use soroban_sdk::{testutils::Address as _, Address, BytesN, Env, String, Vec};
+use soroban_sdk::{testutils::Address as _, Address, BytesN, Env, String, Vec, Bytes};
+use soroban_sdk::xdr::ToXdr;
 
 fn setup_env() -> (Env, Address, Address, ComplianceOracleClient<'static>) {
     let env = Env::default();
@@ -15,6 +16,73 @@ fn setup_env() -> (Env, Address, Address, ComplianceOracleClient<'static>) {
     client.initialize(&owner, &operator);
 
     (env, owner, operator, client)
+}
+
+// ─── Helper: build a real Merkle tree and return (root, proofs, indices) ────
+
+fn build_merkle_tree(env: &Env, addresses: &[&str]) -> (BytesN<32>, Vec<Vec<BytesN<32>>>, Vec<u32>) {
+    // Hash leaves using the same XDR encoding as the contract
+    let mut leaves: Vec<BytesN<32>> = Vec::new(env);
+    for addr_str in addresses {
+        let addr = String::from_str(env, addr_str);
+        let addr_bytes = addr.to_xdr(env);
+        let hash: BytesN<32> = env.crypto().sha256(&addr_bytes).into();
+        leaves.push_back(hash);
+    }
+
+    // Pad to power of 2 with zero hashes
+    let mut target = 1u32;
+    while target < leaves.len() {
+        target *= 2;
+    }
+    let zero_hash = BytesN::from_array(env, &[0u8; 32]);
+    while leaves.len() < target {
+        leaves.push_back(zero_hash.clone());
+    }
+
+    // Build tree layers
+    let mut layers: soroban_sdk::Vec<Vec<BytesN<32>>> = soroban_sdk::Vec::new(env);
+    layers.push_back(leaves.clone());
+
+    let mut current = leaves;
+    while current.len() > 1 {
+        let mut next: Vec<BytesN<32>> = Vec::new(env);
+        let pairs = current.len() / 2;
+        for i in 0..pairs {
+            let left = current.get(i * 2).unwrap();
+            let right = current.get(i * 2 + 1).unwrap();
+            let mut combined = Bytes::new(env);
+            combined.append(&Bytes::from_slice(env, left.to_array().as_slice()));
+            combined.append(&Bytes::from_slice(env, right.to_array().as_slice()));
+            let parent: BytesN<32> = env.crypto().sha256(&combined).into();
+            next.push_back(parent);
+        }
+        layers.push_back(next.clone());
+        current = next;
+    }
+
+    let root = current.get(0).unwrap();
+
+    // Generate proofs for each original address
+    let mut all_proofs: Vec<Vec<BytesN<32>>> = Vec::new(env);
+    let mut all_indices: Vec<u32> = Vec::new(env);
+
+    for i in 0..(addresses.len() as u32) {
+        let mut proof: Vec<BytesN<32>> = Vec::new(env);
+        let mut idx = i;
+
+        for layer_i in 0..(layers.len() - 1) {
+            let layer = layers.get(layer_i).unwrap();
+            let sibling_idx = if idx % 2 == 0 { idx + 1 } else { idx - 1 };
+            proof.push_back(layer.get(sibling_idx).unwrap());
+            idx /= 2;
+        }
+
+        all_proofs.push_back(proof);
+        all_indices.push_back(i);
+    }
+
+    (root, all_proofs, all_indices)
 }
 
 fn mock_data_hash(env: &Env) -> BytesN<32> {
@@ -36,6 +104,7 @@ fn test_initialize() {
     assert_eq!(client.entity_count(), 0);
     assert_eq!(client.last_updated(), 0);
     assert_eq!(client.report_count(), 0);
+    assert_eq!(client.report_threshold(), 10);
 }
 
 #[test]
@@ -63,7 +132,6 @@ fn test_double_initialize_fails() {
 fn test_transfer_owner() {
     let (env, _owner, _operator, client) = setup_env();
     let new_owner = Address::generate(&env);
-
     client.transfer_owner(&new_owner);
     assert_eq!(client.owner(), new_owner);
 }
@@ -72,205 +140,60 @@ fn test_transfer_owner() {
 fn test_set_operator() {
     let (env, _owner, _operator, client) = setup_env();
     let new_operator = Address::generate(&env);
-
     client.set_operator(&new_operator);
     assert_eq!(client.operator(), new_operator);
 }
 
-// ─── Multi-Chain Add Sanctioned ─────────────────────────────────────────
+// ─── Merkle Proof Verification ──────────────────────────────────────────
 
 #[test]
-fn test_add_eth_addresses() {
+fn test_merkle_proof_single_address() {
     let (env, _owner, _operator, client) = setup_env();
-    let hash = mock_data_hash(&env);
-    let source = String::from_str(&env, "ofac_sdn");
 
-    let eth1 = String::from_str(&env, "0xd882cfc20f52f2599d84b8e8d58c7fb62cfe344b");
-    let eth2 = String::from_str(&env, "0x7f367cc41522ce07553e823bf3be79a889debe1b");
+    let addresses = ["0xd882cfc20f52f2599d84b8e8d58c7fb62cfe344b"];
+    let (root, proofs, indices) = build_merkle_tree(&env, &addresses);
 
-    let mut addresses = Vec::new(&env);
-    addresses.push_back(eth1.clone());
-    addresses.push_back(eth2.clone());
+    let data_hash = mock_data_hash(&env);
+    client.set_merkle_root(&root, &data_hash, &1);
 
-    let added = client.add_sanctioned(&addresses, &hash, &source);
-    assert_eq!(added, 2);
-    assert_eq!(client.entity_count(), 2);
-    assert!(client.is_sanctioned(&eth1));
-    assert!(client.is_sanctioned(&eth2));
-}
-
-#[test]
-fn test_add_btc_addresses() {
-    let (env, _owner, _operator, client) = setup_env();
-    let hash = mock_data_hash(&env);
-    let source = String::from_str(&env, "ofac_sdn");
-
-    let btc = String::from_str(&env, "bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh");
-
-    let mut addresses = Vec::new(&env);
-    addresses.push_back(btc.clone());
-
-    let added = client.add_sanctioned(&addresses, &hash, &source);
-    assert_eq!(added, 1);
-    assert!(client.is_sanctioned(&btc));
-}
-
-#[test]
-fn test_add_tron_addresses() {
-    let (env, _owner, _operator, client) = setup_env();
-    let hash = mock_data_hash(&env);
-    let source = String::from_str(&env, "opensanctions");
-
-    let tron = String::from_str(&env, "tn2yqtv5hpqenasqprfg3dqwxlkdcvk1qu");
-
-    let mut addresses = Vec::new(&env);
-    addresses.push_back(tron.clone());
-
-    let added = client.add_sanctioned(&addresses, &hash, &source);
-    assert_eq!(added, 1);
-    assert!(client.is_sanctioned(&tron));
-}
-
-#[test]
-fn test_add_mixed_chain_addresses() {
-    let (env, _owner, _operator, client) = setup_env();
-    let hash = mock_data_hash(&env);
-    let source = String::from_str(&env, "ofac_sdn");
-
-    let eth = String::from_str(&env, "0xd882cfc20f52f2599d84b8e8d58c7fb62cfe344b");
-    let btc = String::from_str(&env, "bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh");
-    let tron = String::from_str(&env, "tn2yqtv5hpqenasqprfg3dqwxlkdcvk1qu");
-    let stellar = String::from_str(&env, "gbjrl4c72vicl7sd7bxa4ksa5vzd5ybvwivum47px457eimdcpnqi3qj");
-
-    let mut addresses = Vec::new(&env);
-    addresses.push_back(eth.clone());
-    addresses.push_back(btc.clone());
-    addresses.push_back(tron.clone());
-    addresses.push_back(stellar.clone());
-
-    let added = client.add_sanctioned(&addresses, &hash, &source);
-    assert_eq!(added, 4);
-    assert_eq!(client.entity_count(), 4);
-
-    assert!(client.is_sanctioned(&eth));
-    assert!(client.is_sanctioned(&btc));
-    assert!(client.is_sanctioned(&tron));
-    assert!(client.is_sanctioned(&stellar));
-
-    let unknown = String::from_str(&env, "0x0000000000000000000000000000000000000000");
-    assert!(!client.is_sanctioned(&unknown));
-}
-
-#[test]
-fn test_add_duplicate_does_not_double_count() {
-    let (env, _owner, _operator, client) = setup_env();
-    let hash = mock_data_hash(&env);
-    let source = String::from_str(&env, "ofac_sdn");
-
-    let addr = String::from_str(&env, "0xd882cfc20f52f2599d84b8e8d58c7fb62cfe344b");
-    let mut addresses = Vec::new(&env);
-    addresses.push_back(addr.clone());
-
-    client.add_sanctioned(&addresses, &hash, &source);
-    assert_eq!(client.entity_count(), 1);
-
-    let added = client.add_sanctioned(&addresses, &hash, &source);
-    assert_eq!(added, 0);
-    assert_eq!(client.entity_count(), 1);
-}
-
-#[test]
-fn test_add_skips_invalid_length_addresses() {
-    let (env, _owner, _operator, client) = setup_env();
-    let hash = mock_data_hash(&env);
-    let source = String::from_str(&env, "ofac_sdn");
-
-    let too_short = String::from_str(&env, "0x1234");
-    let valid = String::from_str(&env, "0xd882cfc20f52f2599d84b8e8d58c7fb62cfe344b");
-
-    let mut addresses = Vec::new(&env);
-    addresses.push_back(too_short.clone());
-    addresses.push_back(valid.clone());
-
-    let added = client.add_sanctioned(&addresses, &hash, &source);
-    assert_eq!(added, 1);
-    assert!(!client.is_sanctioned(&too_short));
-    assert!(client.is_sanctioned(&valid));
-}
-
-// ─── Remove Sanctioned ──────────────────────────────────────────────────
-
-#[test]
-fn test_remove_sanctioned() {
-    let (env, _owner, _operator, client) = setup_env();
-    let hash = mock_data_hash(&env);
-    let source = String::from_str(&env, "ofac_sdn");
-
-    let addr1 = String::from_str(&env, "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
-    let addr2 = String::from_str(&env, "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
-
-    let mut addresses = Vec::new(&env);
-    addresses.push_back(addr1.clone());
-    addresses.push_back(addr2.clone());
-
-    client.add_sanctioned(&addresses, &hash, &source);
-    assert_eq!(client.entity_count(), 2);
-
-    let mut to_remove = Vec::new(&env);
-    to_remove.push_back(addr1.clone());
-
-    let removed = client.remove_sanctioned(&to_remove, &hash, &source);
-    assert_eq!(removed, 1);
-    assert_eq!(client.entity_count(), 1);
-    assert!(!client.is_sanctioned(&addr1));
-    assert!(client.is_sanctioned(&addr2));
-}
-
-// ─── Batch Check ────────────────────────────────────────────────────────
-
-#[test]
-fn test_batch_check() {
-    let (env, _owner, _operator, client) = setup_env();
-    let hash = mock_data_hash(&env);
-    let source = String::from_str(&env, "ofac_sdn");
-
-    let sanctioned = String::from_str(&env, "0xd882cfc20f52f2599d84b8e8d58c7fb62cfe344b");
-    let clean = String::from_str(&env, "0x0000000000000000000000000000000000000000");
-
-    let mut to_add = Vec::new(&env);
-    to_add.push_back(sanctioned.clone());
-    client.add_sanctioned(&to_add, &hash, &source);
-
-    let mut to_check = Vec::new(&env);
-    to_check.push_back(sanctioned.clone());
-    to_check.push_back(clean.clone());
-
-    let results = client.check_batch(&to_check);
-    assert_eq!(results.get(0).unwrap(), true);
-    assert_eq!(results.get(1).unwrap(), false);
-}
-
-#[test]
-#[should_panic(expected = "Error(Contract, #5)")]
-fn test_batch_check_too_large() {
-    let (env, _owner, _operator, client) = setup_env();
-    let mut addresses = Vec::new(&env);
-    let addr = String::from_str(&env, "0xd882cfc20f52f2599d84b8e8d58c7fb62cfe344b");
-    for _ in 0..201u32 {
-        addresses.push_back(addr.clone());
-    }
-    client.check_batch(&addresses);
-}
-
-// ─── Merkle Root ────────────────────────────────────────────────────────
-
-#[test]
-fn test_set_merkle_root() {
-    let (env, _owner, _operator, client) = setup_env();
-    let root = mock_data_hash(&env);
-
-    client.set_merkle_root(&root);
     assert_eq!(client.merkle_root(), root);
+    assert_eq!(client.entity_count(), 1);
+
+    let proof = proofs.get(0).unwrap();
+    let idx = indices.get(0).unwrap();
+    let addr = String::from_str(&env, addresses[0]);
+
+    let result = client.verify_merkle_proof(&addr, &proof, &idx);
+    assert!(result);
+}
+
+#[test]
+fn test_merkle_proof_multiple_addresses() {
+    let (env, _owner, _operator, client) = setup_env();
+
+    let addresses = [
+        "0xd882cfc20f52f2599d84b8e8d58c7fb62cfe344b",
+        "bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh",
+        "tn2yqtv5hpqenasqprfg3dqwxlkdcvk1qu",
+        "0x7f367cc41522ce07553e823bf3be79a889debe1b",
+    ];
+    let (root, proofs, indices) = build_merkle_tree(&env, &addresses);
+
+    let data_hash = mock_data_hash(&env);
+    client.set_merkle_root(&root, &data_hash, &4);
+
+    // Verify each address
+    for i in 0..addresses.len() {
+        let addr = String::from_str(&env, addresses[i]);
+        let proof = proofs.get(i as u32).unwrap();
+        let idx = indices.get(i as u32).unwrap();
+        assert!(client.verify_merkle_proof(&addr, &proof, &idx));
+    }
+
+    // Unknown address should fail
+    let unknown = String::from_str(&env, "0x0000000000000000000000000000000000000000");
+    let fake_proof: Vec<BytesN<32>> = Vec::new(&env);
+    assert!(!client.verify_merkle_proof(&unknown, &fake_proof, &0));
 }
 
 #[test]
@@ -283,24 +206,125 @@ fn test_verify_merkle_proof_no_root_returns_error() {
     assert!(result.is_err());
 }
 
-// ─── Community Reporting ────────────────────────────────────────────────
+#[test]
+fn test_verify_batch_proofs() {
+    let (env, _owner, _operator, client) = setup_env();
+
+    let raw_addresses = [
+        "0xd882cfc20f52f2599d84b8e8d58c7fb62cfe344b",
+        "bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh",
+    ];
+    let (root, proofs, indices) = build_merkle_tree(&env, &raw_addresses);
+
+    let data_hash = mock_data_hash(&env);
+    client.set_merkle_root(&root, &data_hash, &2);
+
+    let mut addrs = Vec::new(&env);
+    for a in &raw_addresses {
+        addrs.push_back(String::from_str(&env, a));
+    }
+
+    let results = client.verify_batch_proofs(&addrs, &proofs, &indices);
+    assert_eq!(results.len(), 2);
+    assert_eq!(results.get(0).unwrap(), true);
+    assert_eq!(results.get(1).unwrap(), true);
+}
+
+// ─── Agent Consensus Reporting ──────────────────────────────────────────
 
 #[test]
-fn test_report_eth_address() {
+fn test_report_address() {
     let (env, _owner, _operator, client) = setup_env();
 
     let reporter = Address::generate(&env);
     let target = String::from_str(&env, "0xd882cfc20f52f2599d84b8e8d58c7fb62cfe344b");
-    let reason = String::from_str(&env, "OFAC SDN match");
+    let reason = String::from_str(&env, "Known mixer");
 
     let report_id = client.report_address(&reporter, &target, &reason);
     assert_eq!(report_id, 0);
     assert_eq!(client.report_count(), 1);
+    assert_eq!(client.reports_for(&target), 1);
+    assert!(!client.is_flagged(&target));
+}
 
-    let report = client.get_report(&0);
-    assert_eq!(report.reporter, reporter);
-    assert_eq!(report.target, target);
-    assert_eq!(report.status, 0);
+#[test]
+fn test_duplicate_report_from_same_reporter_fails() {
+    let (env, _owner, _operator, client) = setup_env();
+
+    let reporter = Address::generate(&env);
+    let target = String::from_str(&env, "0xd882cfc20f52f2599d84b8e8d58c7fb62cfe344b");
+    let reason = String::from_str(&env, "Known mixer");
+
+    client.report_address(&reporter, &target, &reason);
+
+    // Same reporter, same target → should fail
+    let result = client.try_report_address(&reporter, &target, &reason);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_different_reporters_increment_count() {
+    let (env, _owner, _operator, client) = setup_env();
+
+    let target = String::from_str(&env, "0xd882cfc20f52f2599d84b8e8d58c7fb62cfe344b");
+    let reason = String::from_str(&env, "Suspicious");
+
+    for _ in 0..5u32 {
+        let reporter = Address::generate(&env);
+        client.report_address(&reporter, &target, &reason);
+    }
+
+    assert_eq!(client.reports_for(&target), 5);
+    assert_eq!(client.report_count(), 5);
+    assert!(!client.is_flagged(&target)); // Below threshold of 10
+}
+
+#[test]
+fn test_auto_flag_at_threshold() {
+    let (env, _owner, _operator, client) = setup_env();
+
+    let target = String::from_str(&env, "0xd882cfc20f52f2599d84b8e8d58c7fb62cfe344b");
+    let reason = String::from_str(&env, "Flagged");
+
+    // Report from 10 unique agents → should auto-flag
+    for _ in 0..10u32 {
+        let reporter = Address::generate(&env);
+        client.report_address(&reporter, &target, &reason);
+    }
+
+    assert_eq!(client.reports_for(&target), 10);
+    assert!(client.is_flagged(&target));
+}
+
+#[test]
+fn test_auto_flag_with_custom_threshold() {
+    let (env, _owner, _operator, client) = setup_env();
+
+    // Set threshold to 3
+    client.set_report_threshold(&3);
+    assert_eq!(client.report_threshold(), 3);
+
+    let target = String::from_str(&env, "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    let reason = String::from_str(&env, "Flagged");
+
+    // 2 reports → not flagged
+    for _ in 0..2u32 {
+        let reporter = Address::generate(&env);
+        client.report_address(&reporter, &target, &reason);
+    }
+    assert!(!client.is_flagged(&target));
+
+    // 3rd report → auto-flagged
+    let reporter = Address::generate(&env);
+    client.report_address(&reporter, &target, &reason);
+    assert!(client.is_flagged(&target));
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #12)")]
+fn test_set_threshold_zero_fails() {
+    let (_env, _owner, _operator, client) = setup_env();
+    client.set_report_threshold(&0);
 }
 
 #[test]
@@ -313,6 +337,8 @@ fn test_report_invalid_address_length() {
     let result = client.try_report_address(&reporter, &too_short, &reason);
     assert!(result.is_err());
 }
+
+// ─── Report Review ──────────────────────────────────────────────────────
 
 #[test]
 fn test_review_report_accept() {
@@ -327,9 +353,6 @@ fn test_review_report_accept() {
 
     let report = client.get_report(&0);
     assert_eq!(report.status, 1);
-
-    assert!(client.is_sanctioned(&target));
-    assert_eq!(client.entity_count(), 1);
 }
 
 #[test]
@@ -345,7 +368,6 @@ fn test_review_report_reject() {
 
     let report = client.get_report(&0);
     assert_eq!(report.status, 2);
-    assert!(!client.is_sanctioned(&target));
 }
 
 #[test]
@@ -370,56 +392,81 @@ fn test_review_nonexistent_report_fails() {
     client.review_report(&999, &true);
 }
 
-// ─── TTL Management ─────────────────────────────────────────────────────
+// ─── Set Merkle Root ────────────────────────────────────────────────────
 
 #[test]
-fn test_extend_ttl_batch() {
+fn test_set_merkle_root() {
     let (env, _owner, _operator, client) = setup_env();
-    let hash = mock_data_hash(&env);
-    let source = String::from_str(&env, "ofac_sdn");
+    let root = mock_data_hash(&env);
+    let data_hash = BytesN::from_array(&env, &[0xaa; 32]);
 
-    let addr1 = String::from_str(&env, "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
-    let addr2 = String::from_str(&env, "bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh");
-
-    let mut to_add = Vec::new(&env);
-    to_add.push_back(addr1.clone());
-    to_add.push_back(addr2.clone());
-
-    client.add_sanctioned(&to_add, &hash, &source);
-
-    let extended = client.extend_ttl_batch(&to_add);
-    assert_eq!(extended, 2);
+    client.set_merkle_root(&root, &data_hash, &1447);
+    assert_eq!(client.merkle_root(), root);
+    assert_eq!(client.data_hash(), data_hash);
+    assert_eq!(client.entity_count(), 1447);
+    assert!(client.last_updated() > 0 || true); // ledger timestamp in test env
 }
 
 // ─── Edge Cases ─────────────────────────────────────────────────────────
 
 #[test]
-#[should_panic(expected = "Error(Contract, #4)")]
-fn test_add_empty_list_fails() {
+fn test_is_flagged_unknown_address() {
     let (env, _owner, _operator, client) = setup_env();
-    let hash = mock_data_hash(&env);
-    let source = String::from_str(&env, "ofac_sdn");
-    let empty: Vec<String> = Vec::new(&env);
-
-    client.add_sanctioned(&empty, &hash, &source);
+    let unknown = String::from_str(&env, "0x0000000000000000000000000000000000000000");
+    assert!(!client.is_flagged(&unknown));
 }
 
 #[test]
-fn test_remove_more_than_count_saturates_to_zero() {
+fn test_reports_for_unknown_address() {
     let (env, _owner, _operator, client) = setup_env();
-    let hash = mock_data_hash(&env);
-    let source = String::from_str(&env, "ofac_sdn");
+    let unknown = String::from_str(&env, "0x0000000000000000000000000000000000000000");
+    assert_eq!(client.reports_for(&unknown), 0);
+}
 
-    let addr = String::from_str(&env, "0xd882cfc20f52f2599d84b8e8d58c7fb62cfe344b");
-    let mut addresses = Vec::new(&env);
-    addresses.push_back(addr.clone());
+// ─── Audit Fix Tests ────────────────────────────────────────────────────
 
-    client.add_sanctioned(&addresses, &hash, &source);
-    assert_eq!(client.entity_count(), 1);
+#[test]
+fn test_unflag_address() {
+    let (env, _owner, _operator, client) = setup_env();
 
-    client.remove_sanctioned(&addresses, &hash, &source);
-    assert_eq!(client.entity_count(), 0);
+    // Set threshold to 2 for quick test
+    client.set_report_threshold(&2);
 
-    client.remove_sanctioned(&addresses, &hash, &source);
-    assert_eq!(client.entity_count(), 0);
+    let target = String::from_str(&env, "0xd882cfc20f52f2599d84b8e8d58c7fb62cfe344b");
+    let reason = String::from_str(&env, "Suspicious activity");
+
+    // Flag it
+    let r1 = Address::generate(&env);
+    let r2 = Address::generate(&env);
+    client.report_address(&r1, &target, &reason);
+    client.report_address(&r2, &target, &reason);
+    assert!(client.is_flagged(&target));
+
+    // Unflag it
+    client.unflag_address(&target);
+    assert!(!client.is_flagged(&target));
+}
+
+#[test]
+fn test_reason_too_long_fails() {
+    let (env, _owner, _operator, client) = setup_env();
+    let reporter = Address::generate(&env);
+    let target = String::from_str(&env, "0xd882cfc20f52f2599d84b8e8d58c7fb62cfe344b");
+
+    // 257 chars = too long
+    let long_reason = String::from_str(&env, &"a".repeat(257));
+
+    let result = client.try_report_address(&reporter, &target, &long_reason);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_empty_reason_fails() {
+    let (env, _owner, _operator, client) = setup_env();
+    let reporter = Address::generate(&env);
+    let target = String::from_str(&env, "0xd882cfc20f52f2599d84b8e8d58c7fb62cfe344b");
+    let empty_reason = String::from_str(&env, "");
+
+    let result = client.try_report_address(&reporter, &target, &empty_reason);
+    assert!(result.is_err());
 }

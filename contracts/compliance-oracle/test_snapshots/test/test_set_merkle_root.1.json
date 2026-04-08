@@ -38,6 +38,12 @@
               "args": [
                 {
                   "bytes": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
+                },
+                {
+                  "bytes": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                },
+                {
+                  "u32": 1447
                 }
               ]
             }
@@ -46,6 +52,9 @@
         }
       ]
     ],
+    [],
+    [],
+    [],
     []
   ],
   "ledger": {
@@ -85,12 +94,36 @@
                         "key": {
                           "vec": [
                             {
+                              "symbol": "DataHash"
+                            }
+                          ]
+                        },
+                        "val": {
+                          "bytes": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
                               "symbol": "EntityCount"
                             }
                           ]
                         },
                         "val": {
-                          "u32": 0
+                          "u32": 1447
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "LastUpdated"
+                            }
+                          ]
+                        },
+                        "val": {
+                          "u64": 0
                         }
                       },
                       {
@@ -139,6 +172,18 @@
                         },
                         "val": {
                           "u32": 0
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "ReportThreshold"
+                            }
+                          ]
+                        },
+                        "val": {
+                          "u32": 10
                         }
                       }
                     ]

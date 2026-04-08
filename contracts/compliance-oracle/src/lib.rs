@@ -4,38 +4,42 @@ use soroban_sdk::{contract, contractimpl, contracttype, contracterror, Address, 
 use soroban_sdk::xdr::ToXdr;
 
 // ─── Storage Keys ───────────────────────────────────────────────────────────
+//
+// IMPORTANT: New variants are appended at the end to preserve index ordering.
+// Never insert or reorder variants — this would corrupt existing storage.
 
 #[contracttype]
 #[derive(Clone)]
 pub enum DataKey {
-    // ─── IMPORTANT: Variant indices must match the original contract ───
-    // Index 0: was Admin, now Owner (same storage slot, compatible)
+    // ─── Indices 0–8: inherited from v0.4.0 ────────────────────────────
     /// The owner address — controls upgrades and role changes.
-    /// Should be a multi-sig account for production deployments.
-    Owner,           // index 0 (was: Admin)
-    // Index 1-8: unchanged from original contract
-    /// Whether an address is sanctioned: DataKey::Sanctioned(addr_string) → bool
-    ///
-    /// addr_string is the raw address from any chain, **always lowercased**.
-    /// Callers MUST lowercase addresses before querying `is_sanctioned`.
-    Sanctioned(String),  // index 1 (unchanged)
-    /// Total number of sanctioned entities currently on-chain
-    EntityCount,         // index 2 (unchanged)
-    /// Ledger timestamp of last sanctions list update
-    LastUpdated,         // index 3 (unchanged)
+    Owner,               // index 0
+    /// DEPRECATED in v0.5.0 — was Sanctioned(String). Slot preserved.
+    _DeprecatedSanctioned(String), // index 1 (unused, preserves layout)
+    /// Total number of sanctioned entities (set by operator from off-chain count)
+    EntityCount,         // index 2
+    /// Ledger timestamp of last update
+    LastUpdated,         // index 3
     /// SHA-256 hash of the full off-chain dataset (for audit verification)
-    DataHash,            // index 4 (unchanged)
-    /// Merkle root of the full sanctions dataset (for proof verification)
-    MerkleRoot,          // index 5 (unchanged)
-    /// Next report ID
-    ReportCount,         // index 6 (unchanged)
+    DataHash,            // index 4
+    /// Merkle root of the full sanctions dataset
+    MerkleRoot,          // index 5
+    /// Next report ID counter
+    ReportCount,         // index 6
     /// Report detail: ReportData(id) → ReportEntry
-    ReportData(u32),     // index 7 (unchanged)
-    // ─── NEW: Added at the end to avoid index collision ────────────────
-    /// The operator address — controls day-to-day data operations.
-    /// (add/remove sanctions, review reports, set Merkle root, extend TTL)
-    /// Can be a hot wallet since it cannot upgrade or change roles.
-    Operator,            // index 8 (NEW)
+    ReportData(u32),     // index 7
+    /// The operator address — controls day-to-day operations
+    Operator,            // index 8
+
+    // ─── Indices 9+: new in v0.5.0 ─────────────────────────────────────
+    /// Number of unique reporters for a given target address
+    ReportsByTarget(String),         // index 9
+    /// Whether a specific reporter has already flagged a specific target
+    HasReported(Address, String),    // index 10
+    /// Whether an address has been auto-flagged by agent consensus
+    FlaggedByConsensus(String),      // index 11
+    /// Configurable report threshold for auto-flagging
+    ReportThreshold,                 // index 12
 }
 
 /// Community report stored on-chain
@@ -43,10 +47,10 @@ pub enum DataKey {
 #[derive(Clone)]
 pub struct ReportEntry {
     pub reporter: Address,
-    pub target: String,   // Any chain address as a string (lowercased)
+    pub target: String,
     pub reason: String,
     pub timestamp: u64,
-    pub status: u32, // 0=pending, 1=accepted, 2=rejected
+    pub status: u32, // 0=pending, 1=accepted, 2=rejected, 3=auto-flagged
 }
 
 // ─── Error Codes ────────────────────────────────────────────────────────────
@@ -61,61 +65,81 @@ pub enum OracleError {
     NotInitialized = 2,
     /// Caller is not authorized for this operation
     Unauthorized = 3,
-    /// Empty address list provided
+    /// Empty list provided
     EmptyList = 4,
-    /// Batch size exceeds maximum (200)
+    /// Batch size exceeds maximum
     BatchTooLarge = 5,
     /// Invalid Merkle proof provided
     InvalidProof = 6,
     /// Report not found
     ReportNotFound = 7,
-    /// Report has already been reviewed (accepted or rejected)
+    /// Report has already been reviewed
     AlreadyReviewed = 8,
-    /// Maximum number of reports reached (u32::MAX)
+    /// Maximum number of reports reached
     ReportLimitReached = 9,
     /// Address string is too short or too long
     InvalidAddressLength = 10,
+    /// Reporter has already reported this address
+    AlreadyReported = 11,
+    /// Invalid threshold value
+    InvalidThreshold = 12,
+    /// Reason string is empty or too long
+    InvalidReasonLength = 13,
+    /// Batch array lengths do not match
+    ArrayLengthMismatch = 14,
 }
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
 const MAX_BATCH_SIZE: u32 = 200;
 
-/// Minimum address string length (e.g. shortest valid BTC addr ~26 chars)
+/// Minimum address string length
 const MIN_ADDR_LEN: u32 = 10;
-/// Maximum address string length (prevents storage abuse)
+/// Maximum address string length
 const MAX_ADDR_LEN: u32 = 128;
+/// Maximum reason string length (prevents storage bloat)
+const MAX_REASON_LEN: u32 = 256;
 
-// TTL: ~30 days in ledgers (1 ledger ≈ 5 seconds, 30 days ≈ 518400 ledgers)
-const TTL_THRESHOLD: u32 = 259_200;   // Extend when below ~15 days
-const TTL_EXTEND_TO: u32 = 518_400;   // Extend to ~30 days
+/// Default number of unique agent reports before auto-flagging
+const DEFAULT_REPORT_THRESHOLD: u32 = 10;
 
-// Instance TTL: ~90 days (contract code + instance storage)
-const INSTANCE_TTL_THRESHOLD: u32 = 518_400;   // Extend when below ~30 days
-const INSTANCE_TTL_EXTEND_TO: u32 = 1_555_200; // Extend to ~90 days
+// Instance TTL: ~90 days
+const INSTANCE_TTL_THRESHOLD: u32 = 518_400;
+const INSTANCE_TTL_EXTEND_TO: u32 = 1_555_200;
 
-// Report TTL: ~180 days (longer to give admin time to review)
-const REPORT_TTL_THRESHOLD: u32 = 518_400;     // Extend when below ~30 days
-const REPORT_TTL_EXTEND_TO: u32 = 3_110_400;   // Extend to ~180 days
+// Report TTL: ~180 days
+const REPORT_TTL_THRESHOLD: u32 = 518_400;
+const REPORT_TTL_EXTEND_TO: u32 = 3_110_400;
+
+// Consensus flag TTL: ~365 days (long-lived, important data)
+const CONSENSUS_TTL_THRESHOLD: u32 = 1_555_200;
+const CONSENSUS_TTL_EXTEND_TO: u32 = 6_307_200;
 
 // ─── Contract ───────────────────────────────────────────────────────────────
+//
+// v0.5.0 — Full Merkle + Agent Consensus
+//
+// Architecture:
+//   - NO per-address storage. All sanctions data lives off-chain.
+//   - Merkle root on-chain: DeFi protocols verify proofs in-transaction.
+//   - Agent consensus: when enough agents report an address, it auto-flags.
+//   - Off-chain API (in Engram) ingests data, builds trees, serves proofs.
 //
 // Role separation:
 //
 //   OWNER (cold key / multi-sig)        OPERATOR (hot key)
 //   ─────────────────────────           ──────────────────
-//   initialize()                        add_sanctioned()
-//   upgrade()                           remove_sanctioned()
-//   transfer_owner()                    set_merkle_root()
+//   initialize()                        set_merkle_root()
+//   upgrade()                           set_entity_count()
+//   transfer_owner()                    set_report_threshold()
 //   set_operator()                      review_report()
-//                                       extend_ttl_batch()
 //
-//   If the operator key is compromised, the attacker CANNOT:
-//     - Upgrade the contract binary
-//     - Change the owner or operator
-//     - Brick the contract
-//
-//   The owner can revoke the operator at any time via set_operator().
+//   ANYONE                              
+//   ──────                              
+//   verify_merkle_proof()               
+//   verify_batch_proofs()               
+//   report_address()                    
+//   is_flagged()                        
 
 #[contract]
 pub struct ComplianceOracle;
@@ -124,22 +148,18 @@ pub struct ComplianceOracle;
 impl ComplianceOracle {
     // ── Owner / Lifecycle ───────────────────────────────────────────────
 
-    /// Initialize the oracle with an owner and operator address.
-    /// Can only be called once.
-    ///
-    /// - `owner`: Controls upgrades and role changes. Should be a multi-sig.
-    /// - `operator`: Controls data operations. Can be a hot wallet.
-    ///
-    /// For simple setups, pass the same address for both.
+    /// Initialize the oracle with an owner and operator.
     pub fn initialize(env: Env, owner: Address, operator: Address) -> Result<(), OracleError> {
         if env.storage().instance().has(&DataKey::Owner) {
             return Err(OracleError::AlreadyInitialized);
         }
         owner.require_auth();
+
         env.storage().instance().set(&DataKey::Owner, &owner);
         env.storage().instance().set(&DataKey::Operator, &operator);
         env.storage().instance().set(&DataKey::EntityCount, &0u32);
         env.storage().instance().set(&DataKey::ReportCount, &0u32);
+        env.storage().instance().set(&DataKey::ReportThreshold, &DEFAULT_REPORT_THRESHOLD);
 
         env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
 
@@ -150,8 +170,7 @@ impl ComplianceOracle {
         Ok(())
     }
 
-    /// Transfer ownership to a new address. Both old and new owner must authorize.
-    /// This is the highest-privilege operation.
+    /// Transfer ownership. Both old and new owner must authorize.
     pub fn transfer_owner(env: Env, new_owner: Address) -> Result<(), OracleError> {
         let owner = Self::require_owner(&env)?;
         owner.require_auth();
@@ -167,31 +186,7 @@ impl ComplianceOracle {
         Ok(())
     }
 
-    /// One-time migration from v0.3.x → v0.4.0.
-    /// Sets the Operator key (which didn't exist in previous versions).
-    /// Can only be called once (idempotent — fails if Operator already set).
-    /// Owner auth required.
-    pub fn migrate_v4(env: Env, operator: Address) -> Result<(), OracleError> {
-        let owner = Self::require_owner(&env)?;
-        owner.require_auth();
-
-        // Prevent double-migration
-        if env.storage().instance().has(&DataKey::Operator) {
-            return Err(OracleError::AlreadyInitialized);
-        }
-
-        env.storage().instance().set(&DataKey::Operator, &operator);
-        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
-
-        env.events().publish(
-            (Symbol::new(&env, "migrated_v4"),),
-            operator,
-        );
-        Ok(())
-    }
-
-    /// Set a new operator address. Owner only.
-    /// Use this to rotate hot keys or revoke a compromised operator.
+    /// Set a new operator. Owner only.
     pub fn set_operator(env: Env, new_operator: Address) -> Result<(), OracleError> {
         let owner = Self::require_owner(&env)?;
         owner.require_auth();
@@ -206,7 +201,7 @@ impl ComplianceOracle {
         Ok(())
     }
 
-    /// Upgrade the contract to a new WASM binary. Owner only.
+    /// Upgrade the contract WASM. Owner only.
     pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) -> Result<(), OracleError> {
         let owner = Self::require_owner(&env)?;
         owner.require_auth();
@@ -221,12 +216,12 @@ impl ComplianceOracle {
         Ok(())
     }
 
-    /// Returns the current owner address.
+    /// Returns the current owner.
     pub fn owner(env: Env) -> Result<Address, OracleError> {
         Self::require_owner(&env)
     }
 
-    /// Returns the current operator address.
+    /// Returns the current operator.
     pub fn operator(env: Env) -> Result<Address, OracleError> {
         env.storage()
             .instance()
@@ -234,194 +229,12 @@ impl ComplianceOracle {
             .ok_or(OracleError::NotInitialized)
     }
 
-    // ── Read (Free) ─────────────────────────────────────────────────────
+    // ── Merkle Verification (Free, Anyone) ──────────────────────────────
 
-    /// Check if an address from ANY chain is sanctioned.
+    /// Verify a Merkle proof that an address is in the sanctions dataset.
     ///
-    /// **Important**: The address string MUST be lowercased before calling.
-    /// ETH addresses are case-insensitive (EIP-55 mixed-case is a checksum).
-    /// The contract stores all addresses in lowercase.
-    pub fn is_sanctioned(env: Env, addr: String) -> bool {
-        env.storage()
-            .persistent()
-            .get(&DataKey::Sanctioned(addr))
-            .unwrap_or(false)
-    }
-
-    /// Returns the total number of sanctioned entities on-chain.
-    pub fn entity_count(env: Env) -> u32 {
-        env.storage()
-            .instance()
-            .get(&DataKey::EntityCount)
-            .unwrap_or(0u32)
-    }
-
-    /// Returns the ledger timestamp of the last sanctions list update.
-    pub fn last_updated(env: Env) -> u64 {
-        env.storage()
-            .instance()
-            .get(&DataKey::LastUpdated)
-            .unwrap_or(0u64)
-    }
-
-    /// Returns the SHA-256 hash of the off-chain dataset.
-    pub fn data_hash(env: Env) -> BytesN<32> {
-        env.storage()
-            .instance()
-            .get(&DataKey::DataHash)
-            .unwrap_or(BytesN::from_array(&env, &[0u8; 32]))
-    }
-
-    /// Returns the Merkle root of the full sanctions dataset.
-    pub fn merkle_root(env: Env) -> BytesN<32> {
-        env.storage()
-            .instance()
-            .get(&DataKey::MerkleRoot)
-            .unwrap_or(BytesN::from_array(&env, &[0u8; 32]))
-    }
-
-    /// Batch check multiple addresses at once (max 200).
-    /// Returns a vector of booleans in the same order as the input.
-    pub fn check_batch(env: Env, addresses: Vec<String>) -> Result<Vec<bool>, OracleError> {
-        if addresses.len() > MAX_BATCH_SIZE {
-            return Err(OracleError::BatchTooLarge);
-        }
-
-        let mut results = Vec::new(&env);
-        for addr in addresses.iter() {
-            let sanctioned = env
-                .storage()
-                .persistent()
-                .get(&DataKey::Sanctioned(addr))
-                .unwrap_or(false);
-            results.push_back(sanctioned);
-        }
-        Ok(results)
-    }
-
-    // ── Write (Operator Only) ───────────────────────────────────────────
-
-    /// Add addresses to the sanctions list. **Operator only.**
-    ///
-    /// All addresses should be **lowercased** before submission.
-    ///
-    /// - `addresses`: up to 200 address strings per call (10-128 chars each)
-    /// - `data_hash`: SHA-256 of the full dataset snapshot
-    /// - `data_source`: data source identifier (e.g. "ofac_sdn")
-    pub fn add_sanctioned(
-        env: Env,
-        addresses: Vec<String>,
-        data_hash: BytesN<32>,
-        data_source: String,
-    ) -> Result<u32, OracleError> {
-        let op = Self::require_operator(&env)?;
-        op.require_auth();
-
-        let count = addresses.len();
-        if count == 0 {
-            return Err(OracleError::EmptyList);
-        }
-        if count > MAX_BATCH_SIZE {
-            return Err(OracleError::BatchTooLarge);
-        }
-
-        let mut added: u32 = 0;
-        for addr in addresses.iter() {
-            let len = addr.len();
-            if len < MIN_ADDR_LEN || len > MAX_ADDR_LEN {
-                continue;
-            }
-
-            let key = DataKey::Sanctioned(addr.clone());
-            if !env.storage().persistent().has(&key) {
-                env.storage().persistent().set(&key, &true);
-                env.storage().persistent().extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
-                added += 1;
-            } else {
-                env.storage().persistent().extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
-            }
-        }
-
-        let prev_count: u32 = env.storage().instance().get(&DataKey::EntityCount).unwrap_or(0);
-        env.storage().instance().set(&DataKey::EntityCount, &prev_count.saturating_add(added));
-        env.storage().instance().set(&DataKey::LastUpdated, &env.ledger().timestamp());
-        env.storage().instance().set(&DataKey::DataHash, &data_hash);
-
-        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
-
-        env.events().publish(
-            (Symbol::new(&env, "sanctioned_added"),),
-            (added, data_source),
-        );
-
-        Ok(added)
-    }
-
-    /// Remove addresses from the sanctions list. **Operator only.**
-    pub fn remove_sanctioned(
-        env: Env,
-        addresses: Vec<String>,
-        data_hash: BytesN<32>,
-        data_source: String,
-    ) -> Result<u32, OracleError> {
-        let op = Self::require_operator(&env)?;
-        op.require_auth();
-
-        let count = addresses.len();
-        if count == 0 {
-            return Err(OracleError::EmptyList);
-        }
-        if count > MAX_BATCH_SIZE {
-            return Err(OracleError::BatchTooLarge);
-        }
-
-        let mut removed: u32 = 0;
-        for addr in addresses.iter() {
-            let key = DataKey::Sanctioned(addr.clone());
-            if env.storage().persistent().has(&key) {
-                env.storage().persistent().remove(&key);
-                removed += 1;
-            }
-        }
-
-        let prev_count: u32 = env.storage().instance().get(&DataKey::EntityCount).unwrap_or(0);
-        let new_count = prev_count.saturating_sub(removed);
-        env.storage().instance().set(&DataKey::EntityCount, &new_count);
-        env.storage().instance().set(&DataKey::LastUpdated, &env.ledger().timestamp());
-        env.storage().instance().set(&DataKey::DataHash, &data_hash);
-
-        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
-
-        env.events().publish(
-            (Symbol::new(&env, "sanctioned_removed"),),
-            (removed, data_source),
-        );
-
-        Ok(removed)
-    }
-
-    /// Update the Merkle root. **Operator only.**
-    pub fn set_merkle_root(
-        env: Env,
-        root: BytesN<32>,
-    ) -> Result<(), OracleError> {
-        let op = Self::require_operator(&env)?;
-        op.require_auth();
-
-        env.storage().instance().set(&DataKey::MerkleRoot, &root);
-        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
-
-        env.events().publish(
-            (Symbol::new(&env, "merkle_root_updated"),),
-            root,
-        );
-        Ok(())
-    }
-
-    /// Verify a Merkle proof that an address string is in the sanctions dataset.
-    ///
-    /// **Leaf Encoding**: `SHA-256(addr.to_xdr())` — includes XDR envelope.
-    /// Off-chain provers must use the same encoding.
+    /// **Leaf encoding**: `SHA-256(addr.to_xdr())` — includes XDR envelope.
+    /// Off-chain provers must replicate this exact encoding.
     pub fn verify_merkle_proof(
         env: Env,
         addr: String,
@@ -439,32 +252,146 @@ impl ComplianceOracle {
             return Err(OracleError::InvalidProof);
         }
 
-        let addr_bytes = addr.clone().to_xdr(&env);
-        let mut current_hash = env.crypto().sha256(&addr_bytes);
-
-        let mut idx = leaf_index;
-        for sibling in proof.iter() {
-            let sibling_bytes: BytesN<32> = sibling;
-            if idx % 2 == 0 {
-                let mut combined = Bytes::new(&env);
-                combined.append(&Bytes::from_slice(&env, current_hash.to_array().as_slice()));
-                combined.append(&Bytes::from_slice(&env, sibling_bytes.to_array().as_slice()));
-                current_hash = env.crypto().sha256(&combined);
-            } else {
-                let mut combined = Bytes::new(&env);
-                combined.append(&Bytes::from_slice(&env, sibling_bytes.to_array().as_slice()));
-                combined.append(&Bytes::from_slice(&env, current_hash.to_array().as_slice()));
-                current_hash = env.crypto().sha256(&combined);
-            }
-            idx /= 2;
-        }
-
-        Ok(BytesN::from_array(&env, &current_hash.to_array()) == stored_root)
+        let computed_root = Self::compute_merkle_root(&env, &addr, &proof, leaf_index);
+        Ok(BytesN::from_array(&env, &computed_root.to_array()) == stored_root)
     }
 
-    // ── Community Reporting ─────────────────────────────────────────────
+    /// Verify multiple Merkle proofs in a single call. Returns a Vec<bool>.
+    pub fn verify_batch_proofs(
+        env: Env,
+        addresses: Vec<String>,
+        proofs: Vec<Vec<BytesN<32>>>,
+        leaf_indices: Vec<u32>,
+    ) -> Result<Vec<bool>, OracleError> {
+        let count = addresses.len();
+        if count == 0 {
+            return Err(OracleError::EmptyList);
+        }
+        if count > MAX_BATCH_SIZE {
+            return Err(OracleError::BatchTooLarge);
+        }
+        if count != proofs.len() || count != leaf_indices.len() {
+            return Err(OracleError::ArrayLengthMismatch);
+        }
 
-    /// Anyone can report a suspicious address from any chain.
+        let stored_root: BytesN<32> = env
+            .storage()
+            .instance()
+            .get(&DataKey::MerkleRoot)
+            .unwrap_or(BytesN::from_array(&env, &[0u8; 32]));
+
+        let zero_root = BytesN::from_array(&env, &[0u8; 32]);
+        if stored_root == zero_root {
+            return Err(OracleError::InvalidProof);
+        }
+
+        let mut results = Vec::new(&env);
+        for i in 0..count {
+            let addr = addresses.get(i).unwrap();
+            let proof = proofs.get(i).unwrap();
+            let idx = leaf_indices.get(i).unwrap();
+
+            let computed_root = Self::compute_merkle_root(&env, &addr, &proof, idx);
+            results.push_back(
+                BytesN::from_array(&env, &computed_root.to_array()) == stored_root
+            );
+        }
+
+        Ok(results)
+    }
+
+    /// Returns the current Merkle root.
+    pub fn merkle_root(env: Env) -> BytesN<32> {
+        env.storage()
+            .instance()
+            .get(&DataKey::MerkleRoot)
+            .unwrap_or(BytesN::from_array(&env, &[0u8; 32]))
+    }
+
+    /// Returns the SHA-256 hash of the off-chain dataset.
+    pub fn data_hash(env: Env) -> BytesN<32> {
+        env.storage()
+            .instance()
+            .get(&DataKey::DataHash)
+            .unwrap_or(BytesN::from_array(&env, &[0u8; 32]))
+    }
+
+    /// Returns the entity count (set by operator from off-chain).
+    pub fn entity_count(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::EntityCount)
+            .unwrap_or(0u32)
+    }
+
+    /// Returns the ledger timestamp of the last update.
+    pub fn last_updated(env: Env) -> u64 {
+        env.storage()
+            .instance()
+            .get(&DataKey::LastUpdated)
+            .unwrap_or(0u64)
+    }
+
+    // ── Operator Operations ─────────────────────────────────────────────
+
+    /// Update the Merkle root and data hash. Operator only.
+    /// Called by the off-chain API after rebuilding the tree.
+    pub fn set_merkle_root(
+        env: Env,
+        root: BytesN<32>,
+        data_hash: BytesN<32>,
+        entity_count: u32,
+    ) -> Result<(), OracleError> {
+        let op = Self::require_operator(&env)?;
+        op.require_auth();
+
+        env.storage().instance().set(&DataKey::MerkleRoot, &root);
+        env.storage().instance().set(&DataKey::DataHash, &data_hash);
+        env.storage().instance().set(&DataKey::EntityCount, &entity_count);
+        env.storage().instance().set(&DataKey::LastUpdated, &env.ledger().timestamp());
+
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
+
+        env.events().publish(
+            (Symbol::new(&env, "merkle_root_updated"),),
+            (root, entity_count),
+        );
+        Ok(())
+    }
+
+    /// Set the report threshold for agent consensus. Operator only.
+    pub fn set_report_threshold(env: Env, threshold: u32) -> Result<(), OracleError> {
+        let op = Self::require_operator(&env)?;
+        op.require_auth();
+
+        if threshold == 0 {
+            return Err(OracleError::InvalidThreshold);
+        }
+
+        env.storage().instance().set(&DataKey::ReportThreshold, &threshold);
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
+
+        env.events().publish(
+            (Symbol::new(&env, "threshold_changed"),),
+            threshold,
+        );
+        Ok(())
+    }
+
+    /// Returns the current report threshold.
+    pub fn report_threshold(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::ReportThreshold)
+            .unwrap_or(DEFAULT_REPORT_THRESHOLD)
+    }
+
+    // ── Agent Consensus Reporting ───────────────────────────────────────
+
+    /// Any agent (or anyone) can report a suspicious address.
+    /// Each reporter can only report a given target once.
+    /// When the number of unique reporters reaches the threshold,
+    /// the address is auto-flagged.
     pub fn report_address(
         env: Env,
         reporter: Address,
@@ -473,19 +400,33 @@ impl ComplianceOracle {
     ) -> Result<u32, OracleError> {
         reporter.require_auth();
 
+        // Validate target address length
         let len = target.len();
         if len < MIN_ADDR_LEN || len > MAX_ADDR_LEN {
             return Err(OracleError::InvalidAddressLength);
         }
 
+        // Validate reason length (prevent storage bloat — H-1)
+        let reason_len = reason.len();
+        if reason_len == 0 || reason_len > MAX_REASON_LEN {
+            return Err(OracleError::InvalidReasonLength);
+        }
+
+        // Prevent duplicate reports from the same reporter
+        let has_reported_key = DataKey::HasReported(reporter.clone(), target.clone());
+        if env.storage().persistent().has(&has_reported_key) {
+            return Err(OracleError::AlreadyReported);
+        }
+
+        // Get report ID
         let report_id: u32 = env
             .storage()
             .instance()
             .get(&DataKey::ReportCount)
             .unwrap_or(0u32);
-
         let next_id = report_id.checked_add(1).ok_or(OracleError::ReportLimitReached)?;
 
+        // Store the report
         let report = ReportEntry {
             reporter: reporter.clone(),
             target: target.clone(),
@@ -501,18 +442,100 @@ impl ComplianceOracle {
             REPORT_TTL_EXTEND_TO,
         );
 
+        // Mark this reporter as having reported this target
+        env.storage().persistent().set(&has_reported_key, &true);
+        env.storage().persistent().extend_ttl(
+            &has_reported_key,
+            REPORT_TTL_THRESHOLD,
+            REPORT_TTL_EXTEND_TO,
+        );
+
+        // Increment unique reporter count for this target
+        let reports_key = DataKey::ReportsByTarget(target.clone());
+        let prev_reports: u32 = env.storage().persistent().get(&reports_key).unwrap_or(0);
+        let new_reports = prev_reports.saturating_add(1);
+        env.storage().persistent().set(&reports_key, &new_reports);
+        env.storage().persistent().extend_ttl(
+            &reports_key,
+            REPORT_TTL_THRESHOLD,
+            REPORT_TTL_EXTEND_TO,
+        );
+
+        // Update global report counter
         env.storage().instance().set(&DataKey::ReportCount, &next_id);
         env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
 
+        // Check if threshold is reached → auto-flag
+        let threshold: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::ReportThreshold)
+            .unwrap_or(DEFAULT_REPORT_THRESHOLD);
+
+        if new_reports >= threshold {
+            let flagged_key = DataKey::FlaggedByConsensus(target.clone());
+            if !env.storage().persistent().has(&flagged_key) {
+                env.storage().persistent().set(&flagged_key, &true);
+                env.storage().persistent().extend_ttl(
+                    &flagged_key,
+                    CONSENSUS_TTL_THRESHOLD,
+                    CONSENSUS_TTL_EXTEND_TO,
+                );
+
+                env.events().publish(
+                    (Symbol::new(&env, "auto_flagged"),),
+                    (target.clone(), new_reports),
+                );
+            }
+        }
+
         env.events().publish(
             (Symbol::new(&env, "address_reported"),),
-            (report_id, reporter, target),
+            (report_id, reporter, target, new_reports),
         );
 
         Ok(report_id)
     }
 
+    /// Check if an address has been auto-flagged by agent consensus.
+    pub fn is_flagged(env: Env, addr: String) -> bool {
+        env.storage()
+            .persistent()
+            .get(&DataKey::FlaggedByConsensus(addr))
+            .unwrap_or(false)
+    }
+
+    /// Get the number of unique reporters for a target address.
+    pub fn reports_for(env: Env, addr: String) -> u32 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::ReportsByTarget(addr))
+            .unwrap_or(0)
+    }
+
+    /// Remove a false-positive consensus flag. Operator only.
+    /// Use when a flagged address is determined to be legitimate.
+    pub fn unflag_address(env: Env, addr: String) -> Result<(), OracleError> {
+        let op = Self::require_operator(&env)?;
+        op.require_auth();
+
+        let key = DataKey::FlaggedByConsensus(addr.clone());
+        if env.storage().persistent().has(&key) {
+            env.storage().persistent().remove(&key);
+        }
+
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
+
+        env.events().publish(
+            (Symbol::new(&env, "unflagged"),),
+            addr,
+        );
+        Ok(())
+    }
+
     /// Operator reviews a community report. Can only be reviewed once.
+    /// In v0.5.0, acceptance emits an event but does NOT write to storage
+    /// (no per-address sanctions list). The off-chain API picks up the event.
     pub fn review_report(
         env: Env,
         report_id: u32,
@@ -532,27 +555,19 @@ impl ComplianceOracle {
             return Err(OracleError::AlreadyReviewed);
         }
 
-        if accept {
-            report.status = 1;
-
-            let sanction_key = DataKey::Sanctioned(report.target.clone());
-            if !env.storage().persistent().has(&sanction_key) {
-                env.storage().persistent().set(&sanction_key, &true);
-                env.storage().persistent().extend_ttl(&sanction_key, TTL_THRESHOLD, TTL_EXTEND_TO);
-
-                let prev_count: u32 = env.storage().instance().get(&DataKey::EntityCount).unwrap_or(0);
-                env.storage().instance().set(&DataKey::EntityCount, &prev_count.saturating_add(1));
-            }
-        } else {
-            report.status = 2;
-        }
+        report.status = if accept { 1 } else { 2 };
 
         env.storage().persistent().set(&key, &report);
+        env.storage().persistent().extend_ttl(
+            &key,
+            REPORT_TTL_THRESHOLD,
+            REPORT_TTL_EXTEND_TO,
+        );
         env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
 
         env.events().publish(
             (Symbol::new(&env, "report_reviewed"),),
-            (report_id, accept),
+            (report_id, accept, report.target),
         );
         Ok(())
     }
@@ -565,41 +580,12 @@ impl ComplianceOracle {
             .ok_or(OracleError::ReportNotFound)
     }
 
-    /// Get the total number of community reports.
+    /// Get the total number of reports submitted.
     pub fn report_count(env: Env) -> u32 {
         env.storage()
             .instance()
             .get(&DataKey::ReportCount)
             .unwrap_or(0u32)
-    }
-
-    // ── TTL Management (Operator) ───────────────────────────────────────
-
-    /// Batch extend TTL for sanctioned address entries. **Operator only.**
-    pub fn extend_ttl_batch(
-        env: Env,
-        addresses: Vec<String>,
-    ) -> Result<u32, OracleError> {
-        let op = Self::require_operator(&env)?;
-        op.require_auth();
-
-        let count = addresses.len();
-        if count > MAX_BATCH_SIZE {
-            return Err(OracleError::BatchTooLarge);
-        }
-
-        let mut extended: u32 = 0;
-        for addr in addresses.iter() {
-            let key = DataKey::Sanctioned(addr);
-            if env.storage().persistent().has(&key) {
-                env.storage().persistent().extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
-                extended += 1;
-            }
-        }
-
-        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
-
-        Ok(extended)
     }
 
     // ── Internal Helpers ────────────────────────────────────────────────
@@ -616,6 +602,39 @@ impl ComplianceOracle {
             .instance()
             .get(&DataKey::Operator)
             .ok_or(OracleError::NotInitialized)
+    }
+
+    /// Compute Merkle root from a leaf address and proof.
+    fn compute_merkle_root(
+        env: &Env,
+        addr: &String,
+        proof: &Vec<BytesN<32>>,
+        leaf_index: u32,
+    ) -> BytesN<32> {
+        let addr_bytes = addr.clone().to_xdr(env);
+        let hash = env.crypto().sha256(&addr_bytes);
+        let mut current: BytesN<32> = hash.into();
+
+        let mut idx = leaf_index;
+        for sibling in proof.iter() {
+            let sibling_bytes: BytesN<32> = sibling;
+            if idx % 2 == 0 {
+                let mut combined = Bytes::new(env);
+                combined.append(&Bytes::from_slice(env, current.to_array().as_slice()));
+                combined.append(&Bytes::from_slice(env, sibling_bytes.to_array().as_slice()));
+                let h = env.crypto().sha256(&combined);
+                current = h.into();
+            } else {
+                let mut combined = Bytes::new(env);
+                combined.append(&Bytes::from_slice(env, sibling_bytes.to_array().as_slice()));
+                combined.append(&Bytes::from_slice(env, current.to_array().as_slice()));
+                let h = env.crypto().sha256(&combined);
+                current = h.into();
+            }
+            idx /= 2;
+        }
+
+        current
     }
 }
 

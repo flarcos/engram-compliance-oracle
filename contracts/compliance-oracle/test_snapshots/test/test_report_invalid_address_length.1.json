@@ -109,6 +109,18 @@
                         "val": {
                           "u32": 0
                         }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "ReportThreshold"
+                            }
+                          ]
+                        },
+                        "val": {
+                          "u32": 10
+                        }
                       }
                     ]
                   }
