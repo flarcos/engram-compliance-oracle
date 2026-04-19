@@ -29,22 +29,22 @@ A Soroban smart contract that any DeFi protocol on Stellar can call to check if 
 
 > View the contract activity, invocations, and state on [Stellar.Expert](https://stellar.expert/explorer/testnet/contract/CCDAXPPXNXCM25QHYVEWDYBU3FJTNU6Z6BYCHTRRHJEXU6RGVD32PWQF).
 
-## Community Blacklisted Addresses (Testnet)
+## Community Flagged Addresses (Testnet)
 
-The following addresses have been flagged via community reports on the Stellar testnet and are currently blacklisted on-chain:
+The following addresses have been flagged via community reports on the Stellar testnet and are currently flagged on-chain:
 
 | Address | Status |
 |---|---|
-| `GA4ALNXXELASVP2S4FZXQFVXP3BPST7S2MZ5KBCSTR4PK3442NSQ5EQB` | 🚫 Blacklisted |
-| `GAZLTY5QNQQ4WBU6E3T3KKPZAREGARH6JQS4WF76QSWZ7GYTMGBDJZ5X` | 🚫 Blacklisted |
+| `GA4ALNXXELASVP2S4FZXQFVXP3BPST7S2MZ5KBCSTR4PK3442NSQ5EQB` | 🚩 Flagged |
+| `GAZLTY5QNQQ4WBU6E3T3KKPZAREGARH6JQS4WF76QSWZ7GYTMGBDJZ5X` | 🚩 Flagged |
 
 ### Verify with the CLI
 
 ```bash
-# Check a community-blacklisted address
+# Check a community-flagged address
 ./compliance.sh check GA4ALNXXELASVP2S4FZXQFVXP3BPST7S2MZ5KBCSTR4PK3442NSQ5EQB
 
-# Check the second blacklisted address
+# Check the second flagged address
 ./compliance.sh check GAZLTY5QNQQ4WBU6E3T3KKPZAREGARH6JQS4WF76QSWZ7GYTMGBDJZ5X
 ```
 
@@ -55,7 +55,7 @@ use soroban_sdk::Address;
 
 let oracle = ComplianceOracleClient::new(&env, &oracle_contract_id);
 
-// Community-blacklisted addresses will return true
+// Community-flagged addresses will return true
 let addr1: Address = "GA4ALNXXELASVP2S4FZXQFVXP3BPST7S2MZ5KBCSTR4PK3442NSQ5EQB".parse().unwrap();
 let addr2: Address = "GAZLTY5QNQQ4WBU6E3T3KKPZAREGARH6JQS4WF76QSWZ7GYTMGBDJZ5X".parse().unwrap();
 
