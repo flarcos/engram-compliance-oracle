@@ -4,6 +4,8 @@
 
 A Soroban smart contract that any DeFi protocol on Stellar can call to check if an address is on a global sanctions list — on-chain, in the same transaction.
 
+🔗 **[Live Demo →](https://kytdemo.throbbing-cloud-0f8e.workers.dev/)**
+
 ## How It Works
 
 ```
