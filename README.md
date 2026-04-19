@@ -21,6 +21,46 @@ A Soroban smart contract that any DeFi protocol on Stellar can call to check if 
 2. **Admin pushes updates** to the Soroban contract via `add_sanctioned()` / `remove_sanctioned()`
 3. **Any DeFi protocol** calls `is_sanctioned(address)` — free, instant, on-chain
 
+## Live on Testnet
+
+**Soroban Contract:** [`CCDAXPPXNXCM25QHYVEWDYBU3FJTNU6Z6BYCHTRRHJEXU6RGVD32PWQF`](https://stellar.expert/explorer/testnet/contract/CCDAXPPXNXCM25QHYVEWDYBU3FJTNU6Z6BYCHTRRHJEXU6RGVD32PWQF)
+
+> View the contract activity, invocations, and state on [Stellar.Expert](https://stellar.expert/explorer/testnet/contract/CCDAXPPXNXCM25QHYVEWDYBU3FJTNU6Z6BYCHTRRHJEXU6RGVD32PWQF).
+
+## Community Blacklisted Addresses (Testnet)
+
+The following addresses have been flagged via community reports on the Stellar testnet and are currently blacklisted on-chain:
+
+| Address | Status |
+|---|---|
+| `GA4ALNXXELASVP2S4FZXQFVXP3BPST7S2MZ5KBCSTR4PK3442NSQ5EQB` | 🚫 Blacklisted |
+| `GAZLTY5QNQQ4WBU6E3T3KKPZAREGARH6JQS4WF76QSWZ7GYTMGBDJZ5X` | 🚫 Blacklisted |
+
+### Verify with the CLI
+
+```bash
+# Check a community-blacklisted address
+./compliance.sh check GA4ALNXXELASVP2S4FZXQFVXP3BPST7S2MZ5KBCSTR4PK3442NSQ5EQB
+
+# Check the second blacklisted address
+./compliance.sh check GAZLTY5QNQQ4WBU6E3T3KKPZAREGARH6JQS4WF76QSWZ7GYTMGBDJZ5X
+```
+
+### Verify via Contract Call
+
+```rust
+use soroban_sdk::Address;
+
+let oracle = ComplianceOracleClient::new(&env, &oracle_contract_id);
+
+// Community-blacklisted addresses will return true
+let addr1: Address = "GA4ALNXXELASVP2S4FZXQFVXP3BPST7S2MZ5KBCSTR4PK3442NSQ5EQB".parse().unwrap();
+let addr2: Address = "GAZLTY5QNQQ4WBU6E3T3KKPZAREGARH6JQS4WF76QSWZ7GYTMGBDJZ5X".parse().unwrap();
+
+assert!(oracle.is_sanctioned(&addr1));  // true — community flagged
+assert!(oracle.is_sanctioned(&addr2));  // true — community flagged
+```
+
 ## Quick Start
 
 ### For DeFi Integrators
