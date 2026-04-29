@@ -171,17 +171,80 @@ class TaintOrchestrator {
 
   /**
    * Fetch currently flagged/sanctioned addresses from the Engram API.
-   * In production, this calls the compliance API.
-   * For now, it uses a static seed list for testing.
+   * Falls back to static seed addresses if API key is not configured.
    */
   private async fetchFlaggedAddresses(): Promise<void> {
     try {
-      // TODO: Replace with actual Engram API call when available
-      // const response = await fetch(`${this.config.engramApiUrl}/v1/compliance/flagged`);
-      // const data = await response.json();
-      // for (const entry of data.addresses) { ... }
+      if (this.config.engramApiKey) {
+        // ── Live: fetch from Engram API ──
+        const response = await fetch(`${this.config.engramApiUrl}/v1/compliance/flagged?chain=stellar`, {
+          headers: {
+            Authorization: `Bearer ${this.config.engramApiKey}`,
+            Accept: "application/json",
+          },
+        });
 
-      // For now: seed with known test addresses from the contract README
+        if (response.ok) {
+          const data = (await response.json()) as {
+            sanctioned: Array<{
+              address: string;
+              type: string;
+              source: string;
+              severity: number;
+            }>;
+            tainted: Array<{
+              address: string;
+              type: string;
+              source: string;
+              severity: number;
+              hopDepth: number;
+              chain: string;
+            }>;
+            totalCount: number;
+          };
+
+          let newCount = 0;
+
+          for (const entry of data.sanctioned) {
+            if (!this.watchedMap.has(entry.address)) {
+              this.addToWatchList({
+                address: entry.address,
+                type: entry.type as any,
+                source: entry.source,
+                severity: entry.severity,
+                hopDepth: 0,
+                chain: "stellar",
+              });
+              newCount++;
+            }
+          }
+
+          for (const entry of data.tainted) {
+            if (!this.watchedMap.has(entry.address) && entry.hopDepth < this.config.taintMaxHops) {
+              this.addToWatchList({
+                address: entry.address,
+                type: entry.type as any,
+                source: entry.source,
+                severity: entry.severity,
+                hopDepth: entry.hopDepth,
+                chain: entry.chain || "stellar",
+              });
+              newCount++;
+            }
+          }
+
+          if (newCount > 0) {
+            console.log(
+              `[Orchestrator] Fetched ${data.totalCount} flagged addresses from Engram API (+${newCount} new)`
+            );
+          }
+          return;
+        } else {
+          console.warn(`[Orchestrator] Engram API returned ${response.status} — falling back to seed list`);
+        }
+      }
+
+      // ── Fallback: static seed addresses ──
       const seedAddresses: WatchedAddress[] = [
         {
           address: "GA4ALNXXELASVP2S4FZXQFVXP3BPST7S2MZ5KBCSTR4PK3442NSQ5EQB",
