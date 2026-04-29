@@ -10,9 +10,10 @@
 
 import { loadConfig } from "./config.js";
 import { StellarWatcher } from "./stellar-watcher.js";
+import { NearIntentsWatcher } from "./near-intents-watcher.js";
 import { ScoringEngine } from "./scoring.js";
 import { Whitelist } from "./whitelist.js";
-import type { PaymentEvent, TaintRecord, WatchedAddress, WatcherConfig } from "./types.js";
+import type { PaymentEvent, TaintRecord, WatchedAddress, WatcherConfig, ChainWatcher } from "./types.js";
 
 // ─── Rate Limiting ──────────────────────────────────────────────────────
 
@@ -28,7 +29,7 @@ const STORM_WINDOW_MS = 10 * 60 * 1000;
 
 class TaintOrchestrator {
   private config: WatcherConfig;
-  private watcher: StellarWatcher;
+  private watchers: ChainWatcher[] = [];
   private scoring: ScoringEngine;
   private whitelist: Whitelist;
 
@@ -49,7 +50,17 @@ class TaintOrchestrator {
 
   constructor(config: WatcherConfig) {
     this.config = config;
-    this.watcher = new StellarWatcher(config.horizonUrl);
+
+    // Always add Stellar watcher
+    const stellarWatcher = new StellarWatcher(config.horizonUrl);
+    this.watchers.push(stellarWatcher);
+
+    // Conditionally add NEAR Intents bridge watcher
+    if (config.nearIntentsEnabled && config.nearIntentsJwt) {
+      const nearWatcher = new NearIntentsWatcher(config.nearIntentsJwt);
+      this.watchers.push(nearWatcher);
+    }
+
     this.scoring = new ScoringEngine({
       minAmountXlm: config.taintMinAmountXlm,
       maxHops: config.taintMaxHops,
@@ -62,8 +73,8 @@ class TaintOrchestrator {
    */
   async start(): Promise<void> {
     console.log("╔═══════════════════════════════════════════════════════════╗");
-    console.log("║     Engram Taint Watcher v0.6.0                         ║");
-    console.log("║     Transaction Taint Propagation for Stellar           ║");
+    console.log("║     Engram Taint Watcher v0.7.0                         ║");
+    console.log("║     Multi-Chain Taint Propagation                       ║");
     console.log("╚═══════════════════════════════════════════════════════════╝");
     console.log();
     console.log(`  Horizon:    ${this.config.horizonUrl}`);
@@ -72,17 +83,23 @@ class TaintOrchestrator {
     console.log(`  Min Amount: ${this.config.taintMinAmountXlm} XLM`);
     console.log(`  Max Hops:   ${this.config.taintMaxHops}`);
     console.log(`  Whitelist:  ${this.whitelist.size()} addresses`);
+    console.log(`  Watchers:   ${this.watchers.map(w => w.chain).join(", ")}`);
+    console.log(`  Bridge:     ${this.config.nearIntentsEnabled ? "NEAR Intents ✓" : "disabled"}`);
     console.log();
 
-    // 1. Register payment handler
-    this.watcher.onPayment((event) => this.handlePayment(event));
+    // 1. Register payment handler on all watchers
+    for (const watcher of this.watchers) {
+      watcher.onPayment((event) => this.handlePayment(event));
+    }
 
     // 2. Fetch initial flagged addresses
     await this.fetchFlaggedAddresses();
     console.log(`[Orchestrator] Watching ${this.watchedMap.size} addresses`);
 
-    // 3. Start the Stellar watcher
-    await this.watcher.start();
+    // 3. Start all watchers
+    for (const watcher of this.watchers) {
+      await watcher.start();
+    }
 
     // 4. Start polling for new flagged addresses
     this.pollHandle = setInterval(
@@ -105,7 +122,9 @@ class TaintOrchestrator {
   stop(): void {
     if (this.pollHandle) clearInterval(this.pollHandle);
     if (this.hourlyResetHandle) clearInterval(this.hourlyResetHandle);
-    this.watcher.stop();
+    for (const watcher of this.watchers) {
+      watcher.stop();
+    }
     console.log("[Orchestrator] Stopped");
   }
 
@@ -162,7 +181,19 @@ class TaintOrchestrator {
     }
 
     // 7. Push to Engram API (async, non-blocking)
-    this.pushTaintToEngram(taint).catch((err) => {
+    //    Include bridge metadata if this was a cross-chain transfer
+    const enrichedTaint = {
+      ...taint,
+      address: event.recipient,
+      chain: event.chain,
+      ...(event.bridgeProvider ? {
+        bridgeProvider: event.bridgeProvider,
+        originChain: event.originChain,
+        originTxHash: event.originTxHash,
+      } : {}),
+    };
+
+    this.pushTaintToEngram(enrichedTaint).catch((err) => {
       console.error("[Orchestrator] Failed to push taint to Engram:", err);
     });
   }
@@ -285,7 +316,10 @@ class TaintOrchestrator {
     }
 
     this.watchedMap.set(entry.address, entry);
-    this.watcher.subscribe(entry.address);
+    // Subscribe to all watchers
+    for (const watcher of this.watchers) {
+      watcher.subscribe(entry.address);
+    }
     this.hourlyNewWatches++;
   }
 

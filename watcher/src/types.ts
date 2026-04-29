@@ -22,6 +22,12 @@ export interface PaymentEvent {
   txHash: string;
   /** ISO 8601 timestamp */
   timestamp: string;
+  /** Bridge provider if this was a cross-chain transfer */
+  bridgeProvider?: string;
+  /** Source chain if this was a cross-chain transfer */
+  originChain?: string;
+  /** TX hash on the origin chain (for cross-chain transfers) */
+  originTxHash?: string;
 }
 
 /**
@@ -130,4 +136,9 @@ export interface WatcherConfig {
   taintMaxHops: number;
   /** Poll interval in ms for checking new flagged addresses (default 5000) */
   pollIntervalMs: number;
+
+  /** NEAR Intents Explorer API JWT token */
+  nearIntentsJwt: string;
+  /** Enable NEAR Intents cross-chain bridge tracking */
+  nearIntentsEnabled: boolean;
 }

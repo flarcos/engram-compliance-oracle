@@ -17,6 +17,8 @@ export function loadConfig(): WatcherConfig {
     taintMinAmountXlm: Number(env("TAINT_MIN_AMOUNT_XLM", "100")),
     taintMaxHops: Number(env("TAINT_MAX_HOPS", "2")),
     pollIntervalMs: Number(env("POLL_INTERVAL_MS", "5000")),
+    nearIntentsJwt: env("NEAR_INTENTS_JWT", ""),
+    nearIntentsEnabled: env("NEAR_INTENTS_ENABLED", "false") === "true",
   };
 }
 
