@@ -470,3 +470,225 @@ fn test_empty_reason_fails() {
     let result = client.try_report_address(&reporter, &target, &empty_reason);
     assert!(result.is_err());
 }
+
+// ─── Taint Propagation ─────────────────────────────────────────────────
+
+#[test]
+fn test_set_taint() {
+    let (env, _owner, _operator, client) = setup_env();
+
+    let target = String::from_str(&env, "0xd882cfc20f52f2599d84b8e8d58c7fb62cfe344b");
+    let source = String::from_str(&env, "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
+    let chain = String::from_str(&env, "stellar");
+
+    client.set_taint(&target, &72, &source, &1, &chain);
+
+    assert!(client.is_tainted(&target));
+    assert_eq!(client.taint_score(&target), 72);
+    assert_eq!(client.taint_source(&target), source);
+    assert_eq!(client.taint_hop(&target), 1);
+    assert_eq!(client.taint_chain(&target), chain);
+}
+
+#[test]
+fn test_taint_score_and_source() {
+    let (env, _owner, _operator, client) = setup_env();
+
+    let target = String::from_str(&env, "bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh");
+    let source = String::from_str(&env, "0x7f367cc41522ce07553e823bf3be79a889debe1b");
+    let chain = String::from_str(&env, "ethereum");
+
+    client.set_taint(&target, &45, &source, &2, &chain);
+
+    assert_eq!(client.taint_score(&target), 45);
+    assert_eq!(client.taint_source(&target), source);
+    assert_eq!(client.taint_hop(&target), 2);
+    assert_eq!(client.taint_chain(&target), chain);
+}
+
+#[test]
+fn test_is_flagged_includes_taint() {
+    let (env, _owner, _operator, client) = setup_env();
+
+    let target = String::from_str(&env, "0xd882cfc20f52f2599d84b8e8d58c7fb62cfe344b");
+    let source = String::from_str(&env, "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
+    let chain = String::from_str(&env, "stellar");
+
+    // Not flagged initially
+    assert!(!client.is_flagged(&target));
+
+    // Taint it
+    client.set_taint(&target, &80, &source, &1, &chain);
+
+    // Now is_flagged() returns true
+    assert!(client.is_flagged(&target));
+}
+
+#[test]
+fn test_flag_reason() {
+    let (env, _owner, _operator, client) = setup_env();
+
+    let target = String::from_str(&env, "0xd882cfc20f52f2599d84b8e8d58c7fb62cfe344b");
+    let source = String::from_str(&env, "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
+    let chain = String::from_str(&env, "stellar");
+    let reason = String::from_str(&env, "Flagged");
+
+    // Clean
+    assert_eq!(client.flag_reason(&target), 0);
+
+    // Taint only → reason 2
+    client.set_taint(&target, &80, &source, &1, &chain);
+    assert_eq!(client.flag_reason(&target), 2);
+
+    // Add consensus flag → reason 3 (both)
+    client.set_report_threshold(&2);
+    let r1 = Address::generate(&env);
+    let r2 = Address::generate(&env);
+    client.report_address(&r1, &target, &reason);
+    client.report_address(&r2, &target, &reason);
+    assert_eq!(client.flag_reason(&target), 3);
+}
+
+#[test]
+fn test_set_taint_batch() {
+    let (env, _owner, _operator, client) = setup_env();
+
+    let mut addrs = Vec::new(&env);
+    let mut scores = Vec::new(&env);
+    let mut sources = Vec::new(&env);
+    let mut hops = Vec::new(&env);
+    let mut chains = Vec::new(&env);
+
+    let source = String::from_str(&env, "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
+    let chain = String::from_str(&env, "stellar");
+
+    let addr1 = String::from_str(&env, "0xd882cfc20f52f2599d84b8e8d58c7fb62cfe344b");
+    let addr2 = String::from_str(&env, "bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh");
+
+    addrs.push_back(addr1.clone());
+    addrs.push_back(addr2.clone());
+    scores.push_back(80u32);
+    scores.push_back(45u32);
+    sources.push_back(source.clone());
+    sources.push_back(source.clone());
+    hops.push_back(1u32);
+    hops.push_back(2u32);
+    chains.push_back(chain.clone());
+    chains.push_back(chain.clone());
+
+    client.set_taint_batch(&addrs, &scores, &sources, &hops, &chains);
+
+    assert!(client.is_tainted(&addr1));
+    assert_eq!(client.taint_score(&addr1), 80);
+    assert!(client.is_tainted(&addr2));
+    assert_eq!(client.taint_score(&addr2), 45);
+}
+
+#[test]
+fn test_clear_taint() {
+    let (env, _owner, _operator, client) = setup_env();
+
+    let target = String::from_str(&env, "0xd882cfc20f52f2599d84b8e8d58c7fb62cfe344b");
+    let source = String::from_str(&env, "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
+    let chain = String::from_str(&env, "stellar");
+
+    // Set taint
+    client.set_taint(&target, &72, &source, &1, &chain);
+    assert!(client.is_tainted(&target));
+
+    // Clear taint
+    client.clear_taint(&target);
+    assert!(!client.is_tainted(&target));
+    assert_eq!(client.taint_score(&target), 0);
+    assert!(!client.is_flagged(&target));
+}
+
+#[test]
+fn test_whitelist_address() {
+    let (env, _owner, _operator, client) = setup_env();
+
+    let exchange = String::from_str(&env, "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
+
+    assert!(!client.is_whitelisted(&exchange));
+
+    client.whitelist_address(&exchange);
+    assert!(client.is_whitelisted(&exchange));
+}
+
+#[test]
+fn test_set_taint_whitelisted_fails() {
+    let (env, _owner, _operator, client) = setup_env();
+
+    let exchange = String::from_str(&env, "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
+    let source = String::from_str(&env, "0xd882cfc20f52f2599d84b8e8d58c7fb62cfe344b");
+    let chain = String::from_str(&env, "stellar");
+
+    // Whitelist it
+    client.whitelist_address(&exchange);
+
+    // Try to taint it → should fail
+    let result = client.try_set_taint(&exchange, &80, &source, &1, &chain);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_unwhitelist_address() {
+    let (env, _owner, _operator, client) = setup_env();
+
+    let exchange = String::from_str(&env, "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
+    let source = String::from_str(&env, "0xd882cfc20f52f2599d84b8e8d58c7fb62cfe344b");
+    let chain = String::from_str(&env, "stellar");
+
+    // Whitelist then unwhitelist
+    client.whitelist_address(&exchange);
+    client.unwhitelist_address(&exchange);
+    assert!(!client.is_whitelisted(&exchange));
+
+    // Now taint should work
+    client.set_taint(&exchange, &60, &source, &1, &chain);
+    assert!(client.is_tainted(&exchange));
+}
+
+#[test]
+fn test_is_whitelisted_unknown() {
+    let (env, _owner, _operator, client) = setup_env();
+    let unknown = String::from_str(&env, "0x0000000000000000000000000000000000000000");
+    assert!(!client.is_whitelisted(&unknown));
+}
+
+#[test]
+fn test_taint_config_defaults() {
+    let (_env, _owner, _operator, client) = setup_env();
+    let (min_amount, max_hops) = client.taint_config();
+    assert_eq!(min_amount, 1_000_000_000); // 100 XLM
+    assert_eq!(max_hops, 2);
+}
+
+#[test]
+fn test_set_taint_min_amount() {
+    let (_env, _owner, _operator, client) = setup_env();
+    client.set_taint_min_amount(&5_000_000_000i128);
+    let (min_amount, _) = client.taint_config();
+    assert_eq!(min_amount, 5_000_000_000);
+}
+
+#[test]
+fn test_set_taint_max_hops() {
+    let (_env, _owner, _operator, client) = setup_env();
+    client.set_taint_max_hops(&5);
+    let (_, max_hops) = client.taint_config();
+    assert_eq!(max_hops, 5);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #16)")]
+fn test_set_taint_invalid_score_fails() {
+    let (env, _owner, _operator, client) = setup_env();
+
+    let target = String::from_str(&env, "0xd882cfc20f52f2599d84b8e8d58c7fb62cfe344b");
+    let source = String::from_str(&env, "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
+    let chain = String::from_str(&env, "stellar");
+
+    // Score 101 is invalid
+    client.set_taint(&target, &101, &source, &1, &chain);
+}

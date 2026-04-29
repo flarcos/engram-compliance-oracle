@@ -40,6 +40,24 @@ pub enum DataKey {
     FlaggedByConsensus(String),      // index 11
     /// Configurable report threshold for auto-flagging
     ReportThreshold,                 // index 12
+
+    // ─── Indices 13+: Taint Propagation (v0.6.0) ───────────────────────
+    /// Whether an address has been auto-tainted by transaction tracking
+    TaintedByPropagation(String),    // index 13
+    /// Taint score for an address (0–100)
+    TaintScore(String),              // index 14
+    /// The source address that directly caused the taint
+    TaintSource(String),             // index 15
+    /// Hop depth from the original sanctioned address
+    TaintHop(String),                // index 16
+    /// Chain where the taint originated (e.g. "stellar", "ethereum")
+    TaintChain(String),              // index 17
+    /// Minimum amount (in stroops) to trigger taint propagation
+    TaintMinAmount,                  // index 18
+    /// Maximum hop depth for taint propagation
+    TaintMaxHops,                    // index 19
+    /// Whether an address is whitelisted (exempt from taint)
+    WhitelistedAddress(String),      // index 20
 }
 
 /// Community report stored on-chain
@@ -87,6 +105,12 @@ pub enum OracleError {
     InvalidReasonLength = 13,
     /// Batch array lengths do not match
     ArrayLengthMismatch = 14,
+    /// Address is whitelisted and cannot be tainted
+    AddressWhitelisted = 15,
+    /// Taint score must be 0–100
+    InvalidTaintScore = 16,
+    /// Hop depth exceeds maximum configured hops
+    InvalidHopDepth = 17,
 }
 
 // ─── Constants ──────────────────────────────────────────────────────────────
@@ -115,14 +139,31 @@ const REPORT_TTL_EXTEND_TO: u32 = 3_110_400;
 const CONSENSUS_TTL_THRESHOLD: u32 = 1_555_200;
 const CONSENSUS_TTL_EXTEND_TO: u32 = 6_307_200;
 
+// ─── Taint Propagation Constants ────────────────────────────────────────
+
+/// Default minimum amount to trigger taint (100 XLM = 1_000_000_000 stroops)
+const DEFAULT_TAINT_MIN_AMOUNT: i128 = 1_000_000_000;
+/// Default maximum hop depth for taint propagation
+const DEFAULT_TAINT_MAX_HOPS: u32 = 2;
+
+// Taint TTL: ~365 days (permanent intent — no expiry by design)
+const TAINT_TTL_THRESHOLD: u32 = 1_555_200;
+const TAINT_TTL_EXTEND_TO: u32 = 6_307_200;
+
+// Whitelist TTL: ~365 days
+const WHITELIST_TTL_THRESHOLD: u32 = 1_555_200;
+const WHITELIST_TTL_EXTEND_TO: u32 = 6_307_200;
+
 // ─── Contract ───────────────────────────────────────────────────────────────
 //
-// v0.5.0 — Full Merkle + Agent Consensus
+// v0.6.0 — Taint Propagation + Agent Consensus + Merkle Verification
 //
 // Architecture:
-//   - NO per-address storage. All sanctions data lives off-chain.
+//   - NO per-address storage for sanctions. All sanctions data lives off-chain.
 //   - Merkle root on-chain: DeFi protocols verify proofs in-transaction.
 //   - Agent consensus: when enough agents report an address, it auto-flags.
+//   - Taint propagation: operator pushes taint data from off-chain watcher.
+//   - is_flagged() returns true for BOTH consensus-flagged AND tainted addresses.
 //   - Off-chain API (in Engram) ingests data, builds trees, serves proofs.
 //
 // Role separation:
@@ -497,12 +538,37 @@ impl ComplianceOracle {
         Ok(report_id)
     }
 
-    /// Check if an address has been auto-flagged by agent consensus.
+    /// Check if an address is flagged — returns true for BOTH agent consensus
+    /// flags AND taint propagation. Taint is nested under the main flagged status.
     pub fn is_flagged(env: Env, addr: String) -> bool {
-        env.storage()
+        let consensus: bool = env.storage()
             .persistent()
-            .get(&DataKey::FlaggedByConsensus(addr))
-            .unwrap_or(false)
+            .get(&DataKey::FlaggedByConsensus(addr.clone()))
+            .unwrap_or(false);
+        let tainted: bool = env.storage()
+            .persistent()
+            .get(&DataKey::TaintedByPropagation(addr))
+            .unwrap_or(false);
+        consensus || tainted
+    }
+
+    /// Returns the reason an address is flagged:
+    /// 0 = clean, 1 = consensus only, 2 = tainted only, 3 = both
+    pub fn flag_reason(env: Env, addr: String) -> u32 {
+        let consensus: bool = env.storage()
+            .persistent()
+            .get(&DataKey::FlaggedByConsensus(addr.clone()))
+            .unwrap_or(false);
+        let tainted: bool = env.storage()
+            .persistent()
+            .get(&DataKey::TaintedByPropagation(addr))
+            .unwrap_or(false);
+        match (consensus, tainted) {
+            (false, false) => 0,
+            (true, false) => 1,
+            (false, true) => 2,
+            (true, true) => 3,
+        }
     }
 
     /// Get the number of unique reporters for a target address.
@@ -588,6 +654,289 @@ impl ComplianceOracle {
             .unwrap_or(0u32)
     }
 
+    // ── Taint Propagation (v0.6.0) ───────────────────────────────────────
+
+    /// Check if an address has been tainted by transaction propagation.
+    pub fn is_tainted(env: Env, addr: String) -> bool {
+        env.storage()
+            .persistent()
+            .get(&DataKey::TaintedByPropagation(addr))
+            .unwrap_or(false)
+    }
+
+    /// Get the taint score (0–100) for an address.
+    pub fn taint_score(env: Env, addr: String) -> u32 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::TaintScore(addr))
+            .unwrap_or(0)
+    }
+
+    /// Get the source address that directly caused the taint.
+    pub fn taint_source(env: Env, addr: String) -> String {
+        env.storage()
+            .persistent()
+            .get(&DataKey::TaintSource(addr))
+            .unwrap_or(String::from_str(&env, ""))
+    }
+
+    /// Get the hop depth from the original sanctioned address.
+    pub fn taint_hop(env: Env, addr: String) -> u32 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::TaintHop(addr))
+            .unwrap_or(0)
+    }
+
+    /// Get the chain where the taint originated.
+    pub fn taint_chain(env: Env, addr: String) -> String {
+        env.storage()
+            .persistent()
+            .get(&DataKey::TaintChain(addr))
+            .unwrap_or(String::from_str(&env, ""))
+    }
+
+    /// Check if an address is whitelisted (exempt from taint).
+    pub fn is_whitelisted(env: Env, addr: String) -> bool {
+        env.storage()
+            .persistent()
+            .get(&DataKey::WhitelistedAddress(addr))
+            .unwrap_or(false)
+    }
+
+    /// Returns the current taint configuration: (min_amount, max_hops).
+    pub fn taint_config(env: Env) -> (i128, u32) {
+        let min_amount: i128 = env.storage()
+            .instance()
+            .get(&DataKey::TaintMinAmount)
+            .unwrap_or(DEFAULT_TAINT_MIN_AMOUNT);
+        let max_hops: u32 = env.storage()
+            .instance()
+            .get(&DataKey::TaintMaxHops)
+            .unwrap_or(DEFAULT_TAINT_MAX_HOPS);
+        (min_amount, max_hops)
+    }
+
+    /// Set taint for a single address. Operator only.
+    /// Called by the off-chain Taint Watcher service when a flagged address
+    /// sends funds to a new wallet.
+    pub fn set_taint(
+        env: Env,
+        addr: String,
+        score: u32,
+        source: String,
+        hop: u32,
+        chain: String,
+    ) -> Result<(), OracleError> {
+        let op = Self::require_operator(&env)?;
+        op.require_auth();
+
+        // Validate score range
+        if score > 100 {
+            return Err(OracleError::InvalidTaintScore);
+        }
+
+        // Validate address length
+        let len = addr.len();
+        if len < MIN_ADDR_LEN || len > MAX_ADDR_LEN {
+            return Err(OracleError::InvalidAddressLength);
+        }
+
+        // Check whitelist
+        if env.storage().persistent().get(&DataKey::WhitelistedAddress(addr.clone())).unwrap_or(false) {
+            return Err(OracleError::AddressWhitelisted);
+        }
+
+        // Validate hop depth against max
+        let max_hops: u32 = env.storage()
+            .instance()
+            .get(&DataKey::TaintMaxHops)
+            .unwrap_or(DEFAULT_TAINT_MAX_HOPS);
+        if hop > max_hops {
+            return Err(OracleError::InvalidHopDepth);
+        }
+
+        Self::write_taint(&env, &addr, score, &source, hop, &chain);
+
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
+
+        env.events().publish(
+            (Symbol::new(&env, "taint_set"),),
+            (addr, score, source, hop, chain),
+        );
+        Ok(())
+    }
+
+    /// Batch set taint for multiple addresses. Operator only.
+    /// All arrays must have the same length. Max 200 entries.
+    pub fn set_taint_batch(
+        env: Env,
+        addresses: Vec<String>,
+        scores: Vec<u32>,
+        sources: Vec<String>,
+        hops: Vec<u32>,
+        chains: Vec<String>,
+    ) -> Result<(), OracleError> {
+        let op = Self::require_operator(&env)?;
+        op.require_auth();
+
+        let count = addresses.len();
+        if count == 0 {
+            return Err(OracleError::EmptyList);
+        }
+        if count > MAX_BATCH_SIZE {
+            return Err(OracleError::BatchTooLarge);
+        }
+        if count != scores.len() || count != sources.len() || count != hops.len() || count != chains.len() {
+            return Err(OracleError::ArrayLengthMismatch);
+        }
+
+        let max_hops: u32 = env.storage()
+            .instance()
+            .get(&DataKey::TaintMaxHops)
+            .unwrap_or(DEFAULT_TAINT_MAX_HOPS);
+
+        for i in 0..count {
+            let addr = addresses.get(i).unwrap();
+            let score = scores.get(i).unwrap();
+            let source = sources.get(i).unwrap();
+            let hop = hops.get(i).unwrap();
+            let chain = chains.get(i).unwrap();
+
+            // Skip whitelisted addresses
+            if env.storage().persistent().get(&DataKey::WhitelistedAddress(addr.clone())).unwrap_or(false) {
+                continue;
+            }
+
+            // Validate
+            if score > 100 {
+                return Err(OracleError::InvalidTaintScore);
+            }
+            if hop > max_hops {
+                return Err(OracleError::InvalidHopDepth);
+            }
+
+            let len = addr.len();
+            if len < MIN_ADDR_LEN || len > MAX_ADDR_LEN {
+                return Err(OracleError::InvalidAddressLength);
+            }
+
+            Self::write_taint(&env, &addr, score, &source, hop, &chain);
+        }
+
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
+
+        env.events().publish(
+            (Symbol::new(&env, "taint_batch_set"),),
+            count,
+        );
+        Ok(())
+    }
+
+    /// Remove taint from an address. Operator only.
+    pub fn clear_taint(env: Env, addr: String) -> Result<(), OracleError> {
+        let op = Self::require_operator(&env)?;
+        op.require_auth();
+
+        let keys = [
+            DataKey::TaintedByPropagation(addr.clone()),
+            DataKey::TaintScore(addr.clone()),
+            DataKey::TaintSource(addr.clone()),
+            DataKey::TaintHop(addr.clone()),
+            DataKey::TaintChain(addr.clone()),
+        ];
+
+        for key in &keys {
+            if env.storage().persistent().has(key) {
+                env.storage().persistent().remove(key);
+            }
+        }
+
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
+
+        env.events().publish(
+            (Symbol::new(&env, "taint_cleared"),),
+            addr,
+        );
+        Ok(())
+    }
+
+    /// Whitelist an address — exempt from taint propagation. Operator only.
+    /// Whitelisted addresses cannot be tainted via set_taint().
+    pub fn whitelist_address(env: Env, addr: String) -> Result<(), OracleError> {
+        let op = Self::require_operator(&env)?;
+        op.require_auth();
+
+        let key = DataKey::WhitelistedAddress(addr.clone());
+        env.storage().persistent().set(&key, &true);
+        env.storage().persistent().extend_ttl(
+            &key,
+            WHITELIST_TTL_THRESHOLD,
+            WHITELIST_TTL_EXTEND_TO,
+        );
+
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
+
+        env.events().publish(
+            (Symbol::new(&env, "whitelisted"),),
+            addr,
+        );
+        Ok(())
+    }
+
+    /// Remove an address from the whitelist. Operator only.
+    pub fn unwhitelist_address(env: Env, addr: String) -> Result<(), OracleError> {
+        let op = Self::require_operator(&env)?;
+        op.require_auth();
+
+        let key = DataKey::WhitelistedAddress(addr.clone());
+        if env.storage().persistent().has(&key) {
+            env.storage().persistent().remove(&key);
+        }
+
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
+
+        env.events().publish(
+            (Symbol::new(&env, "unwhitelisted"),),
+            addr,
+        );
+        Ok(())
+    }
+
+    /// Set the minimum taint amount (in stroops). Operator only.
+    pub fn set_taint_min_amount(env: Env, amount: i128) -> Result<(), OracleError> {
+        let op = Self::require_operator(&env)?;
+        op.require_auth();
+
+        env.storage().instance().set(&DataKey::TaintMinAmount, &amount);
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
+
+        env.events().publish(
+            (Symbol::new(&env, "taint_min_amt"),),
+            amount,
+        );
+        Ok(())
+    }
+
+    /// Set the maximum hop depth for taint propagation. Operator only.
+    pub fn set_taint_max_hops(env: Env, max_hops: u32) -> Result<(), OracleError> {
+        let op = Self::require_operator(&env)?;
+        op.require_auth();
+
+        if max_hops == 0 {
+            return Err(OracleError::InvalidHopDepth);
+        }
+
+        env.storage().instance().set(&DataKey::TaintMaxHops, &max_hops);
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
+
+        env.events().publish(
+            (Symbol::new(&env, "taint_max_hops"),),
+            max_hops,
+        );
+        Ok(())
+    }
+
     // ── Internal Helpers ────────────────────────────────────────────────
 
     fn require_owner(env: &Env) -> Result<Address, OracleError> {
@@ -602,6 +951,41 @@ impl ComplianceOracle {
             .instance()
             .get(&DataKey::Operator)
             .ok_or(OracleError::NotInitialized)
+    }
+
+    /// Write taint data for an address to persistent storage.
+    fn write_taint(
+        env: &Env,
+        addr: &String,
+        score: u32,
+        source: &String,
+        hop: u32,
+        chain: &String,
+    ) {
+        // Set tainted flag
+        let tainted_key = DataKey::TaintedByPropagation(addr.clone());
+        env.storage().persistent().set(&tainted_key, &true);
+        env.storage().persistent().extend_ttl(&tainted_key, TAINT_TTL_THRESHOLD, TAINT_TTL_EXTEND_TO);
+
+        // Set score
+        let score_key = DataKey::TaintScore(addr.clone());
+        env.storage().persistent().set(&score_key, &score);
+        env.storage().persistent().extend_ttl(&score_key, TAINT_TTL_THRESHOLD, TAINT_TTL_EXTEND_TO);
+
+        // Set source
+        let source_key = DataKey::TaintSource(addr.clone());
+        env.storage().persistent().set(&source_key, source);
+        env.storage().persistent().extend_ttl(&source_key, TAINT_TTL_THRESHOLD, TAINT_TTL_EXTEND_TO);
+
+        // Set hop
+        let hop_key = DataKey::TaintHop(addr.clone());
+        env.storage().persistent().set(&hop_key, &hop);
+        env.storage().persistent().extend_ttl(&hop_key, TAINT_TTL_THRESHOLD, TAINT_TTL_EXTEND_TO);
+
+        // Set chain
+        let chain_key = DataKey::TaintChain(addr.clone());
+        env.storage().persistent().set(&chain_key, chain);
+        env.storage().persistent().extend_ttl(&chain_key, TAINT_TTL_THRESHOLD, TAINT_TTL_EXTEND_TO);
     }
 
     /// Compute Merkle root from a leaf address and proof.

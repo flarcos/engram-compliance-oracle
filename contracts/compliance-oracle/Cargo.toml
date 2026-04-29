@@ -1,6 +1,6 @@
 [package]
 name = "engram-compliance-oracle"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2021"
 description = "On-chain sanctions compliance oracle for Stellar/Soroban — powered by Engram"
 license = "MIT"
