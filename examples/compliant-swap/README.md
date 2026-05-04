@@ -59,6 +59,31 @@ let (is_clean, score, reason) = compliant_swap.check_compliance(&user_address);
 // reason: 0=clean, 1=consensus, 2=tainted, 3=both
 ```
 
+## Test Suite
+
+The test suite runs against a **real oracle contract** — no mocks. Both contracts are deployed in the same Soroban test environment with real token contracts.
+
+### Test Matrix
+
+| Category | Tests | Description |
+|---|---|---|
+| **Simple Gate** | 4 | Clean swap, tainted sender/recipient, consensus-flagged |
+| **Score-Based** | 3 | Below threshold, above threshold, consensus override |
+| **Full Provenance** | 2 | Clean with events, blocked with events |
+| **Compliance Check** | 4 | Clean, tainted, consensus, both flags |
+| **Admin** | 3 | Initialize, set_oracle, set_threshold, double-init |
+| **Edge Cases** | 4 | Zero amount, negative, multiple swaps, custom threshold |
+
+### Run Tests
+
+```bash
+# Build the oracle WASM first (required for contractimport)
+cargo build --target wasm32-unknown-unknown --release -p engram-compliance-oracle
+
+# Run the compliant-swap tests
+cargo test -p compliant-swap
+```
+
 ## Build
 
 ```bash
@@ -67,6 +92,21 @@ cargo build --target wasm32-unknown-unknown --release -p compliant-swap
 ```
 
 ## Deploy
+
+### Quick Deploy (Testnet)
+
+```bash
+cd examples/compliant-swap
+./deploy.sh
+```
+
+The script will:
+1. Build both the oracle and swap WASM
+2. Deploy the swap contract to testnet
+3. Initialize with the deployed oracle
+4. Verify with a compliance check
+
+### Manual Deploy
 
 ```bash
 stellar contract deploy \
@@ -83,6 +123,41 @@ stellar contract invoke \
   --admin <ADMIN_ADDRESS> \
   --oracle_id CCDAXPPXNXCM25QHYVEWDYBU3FJTNU6Z6BYCHTRRHJEXU6RGVD32PWQF \
   --block_threshold 60
+```
+
+### Configuration
+
+| Env Var | Default | Description |
+|---|---|---|
+| `NETWORK` | `testnet` | Stellar network (`testnet` or `mainnet`) |
+| `ORACLE_ID` | `CCDAXPP...` | Deployed oracle contract ID |
+| `BLOCK_THRESHOLD` | `60` | Min taint score to block (0=all, 60=high-risk) |
+
+## Frontend Integration
+
+Check compliance before submitting a swap transaction:
+
+```typescript
+import { Contract, Server } from '@stellar/stellar-sdk';
+
+const server = new Server('https://soroban-testnet.stellar.org');
+const swap = new Contract('SWAP_CONTRACT_ID');
+
+// Pre-check: will this address pass compliance?
+const result = await server.simulateTransaction(
+  swap.call('check_compliance', xdr.Address.fromString(userAddress))
+);
+
+const [isClean, taintScore, flagReason] = result.returnValue;
+
+if (!isClean) {
+  if (flagReason === 1) showWarning('Address flagged by community consensus');
+  if (flagReason === 2) showWarning(`Address tainted (score: ${taintScore})`);
+  if (flagReason === 3) showWarning('Address flagged by consensus AND tainted');
+} else {
+  // Safe to proceed with swap
+  await submitSwap(sender, recipient, tokenIn, tokenOut, amount);
+}
 ```
 
 ## Oracle Contract

@@ -444,3 +444,5 @@ impl CompliantSwap {
         env.storage().instance().set(&DataKey::SwapCount, &(count + 1));
     }
 }
+
+mod test;
